@@ -81,6 +81,66 @@ class DynSys():
         fields = self.unflatten(U)
         return self.solver.write_fields(fields, idx, path)
 
+    # --- AD methods (require JAX backend) ------------------------------------
+
+    def ad_evolve(self, fields, T):
+        """AD-compatible evolution on field lists. Requires JAX backend."""
+        return self.solver.ad_evolve(fields, T)
+
+    def jvp_evolve(self, fields, tangent_fields, T):
+        """Forward-mode AD: exact tangent map J·v on field lists.
+
+        Parameters
+        ----------
+        fields : list of arrays
+            Base point (physical space).
+        tangent_fields : list of arrays
+            Tangent vector v (same structure as fields).
+        T : float
+            Integration time.
+
+        Returns
+        -------
+        primals : list of arrays
+            Evolved fields Φ(fields, T).
+        tangents : list of arrays
+            Tangent output J·v where J = dΦ/d(fields).
+        """
+        from .._backend import jvp
+        primals, tangents = jvp(
+            lambda f: self.solver.ad_evolve(f, T),
+            (fields,), (tangent_fields,)
+        )
+        return primals, tangents
+
+    def vjp_evolve(self, fields, cotangent_fields, T):
+        """Reverse-mode AD: adjoint action J^T·v on field lists.
+
+        Parameters
+        ----------
+        fields : list of arrays
+            Base point (physical space).
+        cotangent_fields : list of arrays
+            Cotangent vector v (same structure as output fields).
+        T : float
+            Integration time.
+
+        Returns
+        -------
+        primals : list of arrays
+            Evolved fields Φ(fields, T).
+        cotangents : list of arrays
+            Adjoint output J^T·v where J = dΦ/d(fields).
+        """
+        from .._backend import vjp
+        primals, vjp_fn = vjp(
+            lambda f: self.solver.ad_evolve(f, T),
+            fields
+        )
+        return primals, vjp_fn(cotangent_fields)
+
+    # -------------------------------------------------------------------------
+
     def floquet_multipliers(self, fields, T, n, tol, ep0=1e-7, sx=None, b='U', test=False):
         ''' Calculates Floquet multipliers using the Arnoldi algorithm.
         Method follows Viswanath (2007), same as Newton method.

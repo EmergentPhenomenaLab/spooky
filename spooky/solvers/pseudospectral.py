@@ -1,7 +1,7 @@
 import abc
 
 from .solver import Solver
-from .._backend import xnp, copy_arr
+from .._backend import xnp, copy_arr, JAX_ENABLED, lax_scan
 from .. import pseudo as ps
 
 class PseudoSpectral(Solver, abc.ABC):
@@ -65,6 +65,32 @@ class PseudoSpectral(Solver, abc.ABC):
             fields = [self.grid.inverse(ff) for ff in fields]
 
         return fields
+
+    def ad_evolve(self, fields, T):
+        """JAX-traceable time evolution using lax.scan. No file I/O.
+
+        Mirrors evolve() but is differentiable end-to-end with jax.grad/jvp/vjp.
+        Requires JAX backend (NUMPY_BACKEND=jax).
+        """
+        if not JAX_ENABLED:
+            raise NotImplementedError(
+                "ad_evolve requires JAX backend (set NUMPY_BACKEND=jax)."
+            )
+
+        fields = [self.grid.forward(ff) for ff in fields]
+        Nt = int(T / self.grid.dt)
+        dt = self.grid.dt
+        rkord = self.rkord
+
+        def step_fn(carry, _):
+            flds = carry
+            prev = flds  # immutable JAX arrays; no copy needed
+            for oo in range(rkord, 0, -1):
+                flds = self.rkstep(flds, prev, oo, dt)
+            return flds, None
+
+        fields, _ = lax_scan(step_fn, fields, None, length=Nt)
+        return [self.grid.inverse(ff) for ff in fields]
 
     @abc.abstractmethod
     def rkstep(self, fields, prev, oo, dt):

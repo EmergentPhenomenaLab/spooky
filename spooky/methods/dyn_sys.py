@@ -4,6 +4,7 @@ import numpy as np
 import functools
 
 from .. import pseudo as ps
+from .._backend import JAX_ENABLED
 
 class DynSys():
     """General class for Dynamical Systems-based methods.
@@ -182,20 +183,21 @@ class DynSys():
 
         def apply_J(dU):
             ''' Applies J (jacobian of poincare map) matrix to vector dU  '''
-            # 1e-7 factor chosen to balance accuracy and numerical stability
-            epsilon = ep0*np.linalg.norm(U)/np.linalg.norm(dU)
-
-            # Perturb U by epsilon*dU
-            U_pert = U + epsilon*dU
-
-            # Calculate derivative w.r.t. initial fields
-            dUT_dU = self.evolve(U_pert, T)
-
-            if sx is not None:
-                dUT_dU = self.translate(dUT_dU, sx)
-
-            dUT_dU = (dUT_dU - UT)/epsilon
-            return dUT_dU
+            if JAX_ENABLED:
+                import jax.numpy as jnp
+                f_jax  = [jnp.array(f) for f in self.unflatten(U)]
+                dU_jax = [jnp.array(d) for d in self.unflatten(dU)]
+                _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
+                J_dU = np.array(self.flatten(tangent_list))
+                if sx is not None:
+                    J_dU = self.translate(J_dU, sx)
+            else:
+                epsilon = ep0 * np.linalg.norm(U) / np.linalg.norm(dU)
+                J_dU = self.evolve(U + epsilon * dU, T)
+                if sx is not None:
+                    J_dU = self.translate(J_dU, sx)
+                J_dU = (J_dU - UT) / epsilon
+            return J_dU
 
         if isinstance(b, str):
             if b == 'U':
@@ -491,17 +493,23 @@ class UPONewtonSolver(DynSys):
             ''' Applies A (extended Jacobian) to vector X^t  '''
             dU, dT, ds = self.unpack_X(dX)
 
-            print(self.norm(U), type(self.pm.eps0), self.norm(dU))
-            epsilon = self.pm.eps0*self.norm(U)/self.norm(dU)
-
-            # Perturb U by epsilon*dU and apply solenoidal projection if sp1 = True
-            U_pert = self.apply_proj(U, epsilon*dU, self.pm.sp1)
-
-            # Calculate derivative w.r.t. initial fields
-            dUT_dU = self.evolve(U_pert, T)
-            if self.pm.sx is not None:
-                dUT_dU = self.translate(dUT_dU,sx)
-            dUT_dU = (dUT_dU - UT)/epsilon
+            if JAX_ENABLED:
+                import jax.numpy as jnp
+                dU_proj = self.sol_project(dU) if self.pm.sp1 else dU
+                f_jax   = [jnp.array(f) for f in self.unflatten(U)]
+                dU_jax  = [jnp.array(d) for d in self.unflatten(dU_proj)]
+                _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
+                dUT_dU = np.array(self.flatten(tangent_list))
+                if self.pm.sx is not None:
+                    dUT_dU = self.translate(dUT_dU, sx)
+            else:
+                print(self.norm(U), type(self.pm.eps0), self.norm(dU))
+                epsilon = self.pm.eps0 * self.norm(U) / self.norm(dU)
+                U_pert  = self.apply_proj(U, epsilon * dU, self.pm.sp1)
+                dUT_dU  = self.evolve(U_pert, T)
+                if self.pm.sx is not None:
+                    dUT_dU = self.translate(dUT_dU, sx)
+                dUT_dU  = (dUT_dU - UT) / epsilon
 
             # Calculate projections of dU needed for extended Newton system
             Tx_proj = np.dot(dU_ds.conj(), dU).real
@@ -940,17 +948,22 @@ class UPONewtonSolver(DynSys):
             ''' Applies A (extended Jacobian) to vector X^t  '''
             dU, dT, ds, dlda = self.unpack_X(dX, arclength = True)
 
-            # 1e-7 factor chosen to balance accuracy and numerical stability
-            epsilon = 1e-7*self.norm(U)/self.norm(dU)
-
-            # Perturb U by epsilon*dU and apply solenoidal projection if sp1 = True
-            U_pert = self.apply_proj(U, epsilon*dU, self.pm.sp1)
-
-            # Calculate derivative w.r.t. initial fields
-            dUT_dU = self.evolve(U_pert, T)
-            if self.pm.sx is not None:
-                dUT_dU = self.translate(dUT_dU,sx)
-            dUT_dU = (dUT_dU - UT)/epsilon
+            if JAX_ENABLED:
+                import jax.numpy as jnp
+                dU_proj = self.sol_project(dU) if self.pm.sp1 else dU
+                f_jax   = [jnp.array(f) for f in self.unflatten(U)]
+                dU_jax  = [jnp.array(d) for d in self.unflatten(dU_proj)]
+                _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
+                dUT_dU = np.array(self.flatten(tangent_list))
+                if self.pm.sx is not None:
+                    dUT_dU = self.translate(dUT_dU, sx)
+            else:
+                epsilon = 1e-7 * self.norm(U) / self.norm(dU)
+                U_pert  = self.apply_proj(U, epsilon * dU, self.pm.sp1)
+                dUT_dU  = self.evolve(U_pert, T)
+                if self.pm.sx is not None:
+                    dUT_dU = self.translate(dUT_dU, sx)
+                dUT_dU  = (dUT_dU - UT) / epsilon
 
             # Calculate projections of dU needed for extended Newton system
             Tx_proj = np.dot(dU_ds.conj(), dU).real

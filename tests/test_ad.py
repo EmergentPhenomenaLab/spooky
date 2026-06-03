@@ -181,6 +181,80 @@ def test_jvp_matches_fd_kolmogorov(kf_setup):
 # VJP: adjoint consistency check (J^T·v, J·w inner product test)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Floquet multipliers: JVP-based tangent vs FD tangent
+# ---------------------------------------------------------------------------
+
+def test_floquet_jvp_matches_fd_kolmogorov(kf_setup):
+    """floquet_multipliers apply_J (JVP) must agree with FD apply_J."""
+    import jax.numpy as jnp
+    from spooky.methods import DynSys
+
+    grid, solver = kf_setup
+    ds = DynSys(solver)
+
+    uu, vv = _kf_ic(grid)
+    U   = ds.flatten([jnp.array(uu), jnp.array(vv)])
+    T   = 0.1
+
+    # JVP path (JAX_ENABLED=True here)
+    evals_jvp, _, _ = ds.floquet_multipliers([jnp.array(uu), jnp.array(vv)], T, n=3, tol=1e-6)
+
+    # FD path — temporarily patch JAX_ENABLED in the module
+    import spooky.methods.dyn_sys as dyn_mod
+    orig = dyn_mod.JAX_ENABLED
+    dyn_mod.JAX_ENABLED = False
+    try:
+        evals_fd, _, _ = ds.floquet_multipliers([uu, vv], T, n=3, tol=1e-6)
+    finally:
+        dyn_mod.JAX_ENABLED = orig
+
+    np.testing.assert_allclose(
+        np.sort(np.abs(evals_jvp)), np.sort(np.abs(evals_fd)),
+        rtol=1e-4,
+        err_msg="Floquet multipliers: JVP and FD Arnoldi disagree",
+    )
+
+
+# ---------------------------------------------------------------------------
+# UPOGradientDescent
+# ---------------------------------------------------------------------------
+
+def test_gradient_descent_reduces_loss_kse(kse_setup):
+    """UPOGradientDescent must reduce the periodicity loss from a random IC."""
+    import jax.numpy as jnp
+    from spooky.methods import UPOGradientDescent
+
+    grid, solver = kse_setup
+    gd = UPOGradientDescent(solver)
+
+    u0 = jnp.array(_kse_ic(grid))
+    T  = 0.5
+
+    loss0 = float(gd.loss([u0], T))
+    _, loss_f = gd.run([u0], T, n_iter=50, tol=1e-12, verbose=False)
+
+    assert loss_f < loss0, f"Loss did not decrease: {loss0:.4e} -> {loss_f:.4e}"
+
+
+def test_gradient_descent_reduces_loss_kolmogorov(kf_setup):
+    """UPOGradientDescent must reduce the periodicity loss (Kolmogorov)."""
+    import jax.numpy as jnp
+    from spooky.methods import UPOGradientDescent
+
+    grid, solver = kf_setup
+    gd = UPOGradientDescent(solver)
+
+    uu, vv = _kf_ic(grid)
+    u0, v0 = jnp.array(uu), jnp.array(vv)
+    T = 0.5
+
+    loss0 = float(gd.loss([u0, v0], T))
+    _, loss_f = gd.run([u0, v0], T, n_iter=50, tol=1e-12, verbose=False)
+
+    assert loss_f < loss0, f"Loss did not decrease: {loss0:.4e} -> {loss_f:.4e}"
+
+
 def test_vjp_adjoint_consistency_kolmogorov(kf_setup):
     """<J·w, v> == <w, J^T·v> to machine precision (Kolmogorov)."""
     import jax.numpy as jnp

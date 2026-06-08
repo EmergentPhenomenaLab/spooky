@@ -644,19 +644,18 @@ class UPONewtonSolver(DynSys):
 
             if JAX_ENABLED:
                 import jax.numpy as jnp
-                dU_proj = self.sol_project(dU) if self.pm.sp1 else dU
+                dU_proj = self.sol_project(dU) if self.sp1 else dU
                 f_jax   = [jnp.array(f) for f in self.unflatten(U)]
                 dU_jax  = [jnp.array(d) for d in self.unflatten(dU_proj)]
                 _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
                 dUT_dU = np.array(self.flatten(tangent_list))
-                if self.pm.sx is not None:
+                if self.sx is not None:
                     dUT_dU = self.translate(dUT_dU, sx)
             else:
-                print(self.norm(U), type(self.pm.eps0), self.norm(dU))
-                epsilon = self.pm.eps0 * self.norm(U) / self.norm(dU)
-                U_pert  = self.apply_proj(U, epsilon * dU, self.pm.sp1)
+                epsilon = self.eps0 * self.norm(U) / self.norm(dU)
+                U_pert  = self.apply_proj(U, epsilon * dU, self.sp1)
                 dUT_dU  = self.evolve(U_pert, T)
-                if self.pm.sx is not None:
+                if self.sx is not None:
                     dUT_dU = self.translate(dUT_dU, sx)
                 dUT_dU  = (dUT_dU - UT) / epsilon
 
@@ -977,22 +976,22 @@ class ArclengthNewtonSolver(UPONewtonSolver):
 
         def apply_A(dX):
             ''' Applies A (extended Jacobian) to vector X^t  '''
-            dU, dT, ds, dlda = self.unpack_X(dX, arclength = True)
+            dU, dT, ds, dlda_val = self.unpack_X(dX)
 
             if JAX_ENABLED:
                 import jax.numpy as jnp
-                dU_proj = self.sol_project(dU) if self.pm.sp1 else dU
+                dU_proj = self.sol_project(dU) if self.sp1 else dU
                 f_jax   = [jnp.array(f) for f in self.unflatten(U)]
                 dU_jax  = [jnp.array(d) for d in self.unflatten(dU_proj)]
                 _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
                 dUT_dU = np.array(self.flatten(tangent_list))
-                if self.pm.sx is not None:
+                if self.sx is not None:
                     dUT_dU = self.translate(dUT_dU, sx)
             else:
-                epsilon = 1e-7 * self.norm(U) / self.norm(dU)
-                U_pert  = self.apply_proj(U, epsilon * dU, self.pm.sp1)
+                epsilon = self.eps0 * self.norm(U) / self.norm(dU)
+                U_pert  = self.apply_proj(U, epsilon * dU, self.sp1)
                 dUT_dU  = self.evolve(U_pert, T)
-                if self.pm.sx is not None:
+                if self.sx is not None:
                     dUT_dU = self.translate(dUT_dU, sx)
                 dUT_dU  = (dUT_dU - UT) / epsilon
 
@@ -1073,6 +1072,8 @@ class ArclengthNewtonSolver(UPONewtonSolver):
         """Save converged solution fields and scalar parameters to the converged directory."""
         U, T, sx, lda = self.unpack_X(X)
         path = self._get_path(self.converged_dir, "solver.txt", iA=iA)
+        if not path:
+            return
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         if iA == 0 and not os.path.exists(path):

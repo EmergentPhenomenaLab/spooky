@@ -19,7 +19,8 @@ class GHOST(Solver):
                  solver: str = 'HD',
                  dimension: int = 2,
                  precision: str = 'double',
-                 ext: int = 4):
+                 ext: int = 4,
+                 seed: int = 42):
         self.grid = grid
         self.nu = nu
         self.nprocs = nprocs
@@ -27,6 +28,7 @@ class GHOST(Solver):
         self.dimension = dimension
         self.precision = precision
         self.ext = ext
+        self.seed = seed
 
         if self.dimension == 2:
             self.ftypes = ['uu', 'vv']
@@ -64,7 +66,7 @@ class GHOST(Solver):
             ipath = opath
             
         self.write_fields(fields, path=ipath, idx=1)
-        self.ch_params(T, ipath, opath, bstep, ostep, sstep, vort) #save fields every ostep, bal every bstep, spectrum every sstep
+        self.ch_params(T, ipath, opath, bstep, ostep, sstep, vort, self.seed) #save fields every ostep, bal every bstep, spectrum every sstep
 
         #run GHOST
         subprocess.run(f'mpirun -n {self.nprocs} ./{self.solver.upper()}', shell = True)
@@ -115,7 +117,7 @@ class GHOST(Solver):
                 fields.append(np.fromfile(file,dtype=dtype).reshape(self.grid.shape,order='F'))
         return fields
 
-    def ch_params(self, T, ipath, opath, bstep = 0, ostep=0, sstep = 0, vort = False, stat = 1):
+    def ch_params(self, T, ipath, opath, bstep=0, ostep=0, sstep=0, vort=False, seed=42, stat=1):
         '''Changes parameter to update params throughout algorithm '''
         if self.dimension == 2:
             suffix = 'txt'
@@ -149,6 +151,8 @@ class GHOST(Solver):
                     lines[i] = 'outs = 1   ! controls the amount of output\n'
                 else: 
                     lines[i] = 'outs = 0   ! controls the amount of output\n'
+            if line.startswith('seed'):
+                lines[i] = f'seed = {seed}  ! seed for the random number generator\n'
 
         #write
         with open(f'parameter.{suffix}', 'w') as file:

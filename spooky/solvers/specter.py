@@ -17,17 +17,16 @@ class SPECTER(Solver):
 
     def __init__(self,
                  grid: ps.Grid2D_semi,
-                 nprocs: int,
                  ra: float,
                  pr: float,
                  gamma: float = 1.,
                  solver: str ='BOUSS',
                  ftypes: list =['vx', 'vz', 'th'],
                  precision: str = 'double',
-                 ext: int = 5):
+                 ext: int = 5,
+                 nprocs: int = None):
         super().__init__(grid)
         self.grid = grid
-        self.nprocs = nprocs
         self.ra = ra
         self.pr = pr
         self.gamma = gamma
@@ -35,6 +34,11 @@ class SPECTER(Solver):
         self.ftypes = ftypes
         self.precision = precision
         self.ext = ext
+
+        if nprocs is not None:
+            self.nprocs = nprocs
+        else:
+            self.nprocs = max(1, int(os.environ.get('SLURM_NTASKS', 2)) - 1)
 
     def evolve(self, fields, T, ipath=None, opath = '.', bpath='.', ostep=0, bstep=0):
         '''Evolves fields in T time and translates by sx. Calls Fortran'''

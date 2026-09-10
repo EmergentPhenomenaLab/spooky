@@ -157,6 +157,142 @@ class Grid2D(Grid1D):
         return self.pxx*fu + self.pxy*fv, self.pxy*fu + self.pyy*fv
 
 
+def _cheb(N):
+    ''' Chebyshev-Gauss-Lobatto nodes and differentiation matrix on [-1, 1].
+
+    Returns nodes ``x`` (shape N+1, ordered x_0=1 ... x_N=-1) and the dense
+    differentiation matrix ``D`` such that ``(D @ f)`` approximates ``df/dx`` at
+    the nodes (Trefethen, *Spectral Methods in MATLAB*, cheb.m).
+    '''
+    if N == 0:
+        return xnp.array([1.0]), xnp.zeros((1, 1))
+    x = xnp.cos(xnp.pi * xnp.arange(N + 1) / N)
+    c = xnp.hstack([2.0, xnp.ones(N - 1), 2.0]) * (-1.0) ** xnp.arange(N + 1)
+    X = xnp.tile(x, (N + 1, 1)).T
+    dX = X - X.T
+    D = xnp.outer(c, 1.0 / c) / (dX + xnp.eye(N + 1))
+    D = D - xnp.diag(xnp.sum(D, axis=1))
+    return x, D
+
+
+def _clencurt(N):
+    ''' Clenshaw-Curtis quadrature weights for the N+1 CGL nodes on [-1, 1]
+    (Trefethen, *Spectral Methods in MATLAB*, clencurt.m). '''
+    if N == 0:
+        return xnp.array([2.0])
+    theta = xnp.pi * xnp.arange(N + 1) / N
+    w = xnp.zeros(N + 1)
+    v = xnp.ones(N - 1)
+    ii = xnp.arange(1, N)
+    if N % 2 == 0:
+        w = index_update(w, 0, 1.0 / (N ** 2 - 1))
+        w = index_update(w, N, 1.0 / (N ** 2 - 1))
+        for k in range(1, N // 2):
+            v = v - 2.0 * xnp.cos(2.0 * k * theta[ii]) / (4.0 * k ** 2 - 1)
+        v = v - xnp.cos(N * theta[ii]) / (N ** 2 - 1)
+    else:
+        w = index_update(w, 0, 1.0 / N ** 2)
+        w = index_update(w, N, 1.0 / N ** 2)
+        for k in range(1, (N - 1) // 2 + 1):
+            v = v - 2.0 * xnp.cos(2.0 * k * theta[ii]) / (4.0 * k ** 2 - 1)
+    w = index_update(w, ii, 2.0 * v / N)
+    return w
+
+
+class Grid2D_wall(Grid1D):
+    ''' 2D grid periodic in x, wall-bounded (Chebyshev) in z.
+
+    Fourier (rfft) in x, Chebyshev-Gauss-Lobatto collocation in z. The z-grid
+    *includes both walls* (z=0 at index 0, z=Lz at index Nz-1) so that Dirichlet
+    boundary conditions sit at the first and last collocation rows -- this lines
+    up with ``DynSys.remove_boundary`` which strips ``[:, 1:-1]``.
+
+    Mixed-space fields produced by ``forward`` have shape ``(Nx//2+1, Nz)``:
+    Fourier in x (axis 0), physical Chebyshev values in z (axis 1). z-derivatives
+    are applied as dense matrix products (``dz``/``dz2``); x-derivatives use the
+    spectral factor ``i*kx``.
+    '''
+    remove_boundary = True
+
+    def __init__(self, Lx, Lz, Nx, Nz, dt):
+        super().__init__(Lx, Nx, dt)
+        N = Nz - 1
+
+        # Chebyshev nodes/matrix on [-1, 1], mapped affinely to z in [0, Lz].
+        # x = 1 - 2 z / Lz  =>  z=0 at x=1 (index 0), z=Lz at x=-1 (index N).
+        xc, Dc = _cheb(N)
+        zi = Lz * (1.0 - xc) / 2.0
+        Dz = (-2.0 / Lz) * Dc           # d/dz = (dx/dz) d/dx,  dx/dz = -2/Lz
+        Dz2 = Dz @ Dz
+        wz = (Lz / 2.0) * _clencurt(N)  # integration weights in z over [0, Lz]
+
+        zz = xnp.tile(zi, (Nx, 1))      # (Nx, Nz) physical z coordinate
+
+        self.Lx = Lx
+        self.Lz = Lz
+        self.zi = zi
+        self.zz = zz
+        self.Dz = Dz
+        self.Dz2 = Dz2
+        self.wz = wz
+
+        # x-direction spectral data over rfft modes
+        Nkx = Nx // 2 + 1
+        self.Nkx = Nkx
+        self.kx = 2.0 * xnp.pi * xnp.fft.rfftfreq(Nx, self.dx)   # (Nkx,)
+        self.kx_col = self.kx[:, None]                          # (Nkx, 1) broadcast
+        self.k2x = self.kx ** 2
+        ki = xnp.fft.rfftfreq(Nx, 1 / Nx)
+        self.dealias_modes = (ki > Nx / 3)[:, None]            # x-mode mask, (Nkx,1)
+
+        self.Nx = Nx
+        self.Nz = Nz
+        self.N = Nx * Nz
+        self.shape = (Nx, Nz)
+
+    def forward(self, ui):
+        ''' Forward Fourier transform in x only '''
+        return xnp.fft.rfft(ui, axis=0)
+
+    def inverse(self, ui):
+        ''' Inverse Fourier transform in x only '''
+        return xnp.fft.irfft(ui, n=self.Nx, axis=0).real
+
+    def ddx(self, fhat):
+        ''' x-derivative in mixed space (spectral factor i*kx).
+        Named ``ddx`` to avoid clashing with ``self.dx`` (the x grid spacing). '''
+        return 1.0j * self.kx_col * fhat
+
+    def dz(self, fhat):
+        ''' z-derivative in mixed space (Chebyshev matrix on axis 1) '''
+        return fhat @ self.Dz.T
+
+    def dz2(self, fhat):
+        ''' second z-derivative in mixed space '''
+        return fhat @ self.Dz2.T
+
+    def translate(self, fields, sx):
+        ''' Translate fields by sx in x only (z is wall-bounded, not periodic) '''
+        f = [self.forward(ff) for ff in fields]
+        f = [ff * xnp.exp(1.0j * self.kx_col * sx) for ff in f]
+        return [self.inverse(ff) for ff in f]
+
+    def deriv_fields(self, fields, *args):
+        ''' x-derivative of physical fields (used by DynSys.deriv_U) '''
+        f = [self.forward(ff) for ff in fields]
+        f = [self.ddx(ff) for ff in f]
+        return [self.inverse(ff) for ff in f]
+
+    def integrate(self, field):
+        ''' Domain integral of a real physical field, shape (Nx, Nz), using
+        uniform x-spacing and Clenshaw-Curtis weights in z. '''
+        return self.dx * xnp.sum(field * self.wz[None, :])
+
+    def average(self, field):
+        ''' Domain average of a real physical field '''
+        return self.integrate(field) / (self.Lx * self.Lz)
+
+
 class Grid2D_semi(Grid1D):
     ''' 2D grid periodic only in the horizontal direction. To be used with the SPECTER wrapper '''
     def __init__(self, Lx, Lz, Nx, Nz, dt):

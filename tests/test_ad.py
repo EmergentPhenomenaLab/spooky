@@ -80,6 +80,46 @@ def test_ad_evolve_matches_evolve_kolmogorov(kf_setup):
     np.testing.assert_allclose(np.array(out[1]), ref[1], atol=1e-10)
 
 
+def test_ad_evolve_fractional_final_step_kse(kse_setup):
+    """ad_evolve must take the same exact fractional final step as evolve.
+
+    Covers two regimes: T a genuine non-multiple of dt (100.5*dt), and T whose
+    float division T/dt lands just below an integer (0.3/1e-3 = 299.999...),
+    where a bare int() truncation would silently drop a full step.
+    """
+    import jax
+    import jax.numpy as jnp
+    grid, solver = kse_setup
+    ic = _kse_ic(grid)
+
+    for T in (100.5 * grid.dt, 0.3):
+        ref = solver.evolve([ic], T=T, write_outputs=False)
+        out = solver.ad_evolve([jnp.array(ic)], T=T)
+        np.testing.assert_allclose(
+            np.array(out[0]), ref[0], atol=1e-10,
+            err_msg=f"KSE: ad_evolve differs from evolve at T={T}")
+
+    # gradient through the fractional-step branch must be finite
+    def loss(u):
+        return jnp.sum(solver.ad_evolve([u], T=100.5 * grid.dt)[0] ** 2)
+
+    grad = jax.grad(loss)(jnp.array(ic))
+    assert jnp.all(jnp.isfinite(grad))
+
+
+def test_ad_evolve_fractional_final_step_kolmogorov(kf_setup):
+    """Same as the KSE fractional-step test, on the 2D Kolmogorov solver."""
+    import jax.numpy as jnp
+    grid, solver = kf_setup
+    uu, vv = _kf_ic(grid)
+
+    T = 10.5 * grid.dt
+    ref = solver.evolve([uu, vv], T=T, write_outputs=False)
+    out = solver.ad_evolve([jnp.array(uu), jnp.array(vv)], T=T)
+    np.testing.assert_allclose(np.array(out[0]), ref[0], atol=1e-10)
+    np.testing.assert_allclose(np.array(out[1]), ref[1], atol=1e-10)
+
+
 # ---------------------------------------------------------------------------
 # Differentiability
 # ---------------------------------------------------------------------------
@@ -253,6 +293,47 @@ def test_gradient_descent_reduces_loss_kolmogorov(kf_setup):
     _, loss_f = gd.run([u0, v0], T, n_iter=50, tol=1e-12, verbose=False)
 
     assert loss_f < loss0, f"Loss did not decrease: {loss0:.4e} -> {loss_f:.4e}"
+
+
+# ---------------------------------------------------------------------------
+# Lyapunov exponents: JVP-based tangent vs FD tangent
+# ---------------------------------------------------------------------------
+
+def test_lyapunov_jvp_matches_fd_kolmogorov(kf_setup):
+    """lyapunov_exponents apply_J (JVP) must agree with FD apply_J (Kolmogorov).
+
+    Both runs start with the same random Q (fixed seed) so the only difference
+    is how apply_J evaluates J·dU.  After enough QR steps the finite-time
+    exponents should agree within a few percent.
+    """
+    import jax.numpy as jnp
+    from spooky.methods import DynSys
+
+    grid, solver = kf_setup
+    ds = DynSys(solver)
+
+    uu, vv = _kf_ic(grid)
+    T = 0.1
+    n, nsteps = 3, 15
+
+    np.random.seed(42)
+    lyap_jvp, _ = ds.lyapunov_exponents([jnp.array(uu), jnp.array(vv)],
+                                        T, n=n, nsteps=nsteps)
+
+    import spooky.methods.dyn_sys as dyn_mod
+    orig = dyn_mod.JAX_ENABLED
+    dyn_mod.JAX_ENABLED = False
+    try:
+        np.random.seed(42)
+        lyap_fd, _ = ds.lyapunov_exponents([uu, vv], T, n=n, nsteps=nsteps)
+    finally:
+        dyn_mod.JAX_ENABLED = orig
+
+    np.testing.assert_allclose(
+        lyap_jvp, lyap_fd,
+        rtol=0.05,
+        err_msg="Lyapunov exponents: JVP and FD Benettin disagree",
+    )
 
 
 def test_vjp_adjoint_consistency_kolmogorov(kf_setup):

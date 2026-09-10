@@ -24,7 +24,11 @@ class DynSys():
         self.solver = solver
         self.grid = solver.grid
 
-        self.remove_boundary = False
+        # Wall-bounded grids carry interior-only state for the UPO/Floquet
+        # machinery: the Dirichlet boundary rows are stripped on flatten and
+        # re-padded with zeros on unflatten. Grids advertise this via a
+        # ``remove_boundary`` attribute (e.g. Grid2D_semi).
+        self.remove_boundary = getattr(self.grid, 'remove_boundary', False)
         if isinstance(self.grid, ps.Grid2D_semi):
             self.remove_boundary = True
 
@@ -140,6 +144,86 @@ class DynSys():
         )
         return primals, vjp_fn(cotangent_fields)
 
+    def tangent_map(self, U, dU, T, sx=None, UT=None, ep0=1e-7):
+        """Action of the tangent map J = d(translate_sx ∘ Φ_T)/dU on dU.
+
+        Flat-vector interface shared by Floquet, Lyapunov and Newton-Krylov.
+        JAX backend: exact JVP through ad_evolve.  NumPy backend: first-order
+        finite difference with step ep0*|U|/|dU|, which requires ``UT``.
+
+        Parameters
+        ----------
+        U, dU : np.ndarray
+            Flat base point and perturbation.
+        T : float
+            Integration time.
+        sx : float or None
+            Optional x-translation applied after the flow map.
+        UT : np.ndarray or None
+            Base-point image translate(Φ_T(U), sx) — required for the FD
+            (NumPy) path, ignored under JAX.
+        ep0 : float
+            FD perturbation scale factor.
+        """
+        if JAX_ENABLED:
+            import jax.numpy as jnp
+            f_jax  = [jnp.array(f) for f in self.unflatten(U)]
+            dU_jax = [jnp.array(d) for d in self.unflatten(dU)]
+            _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
+            J_dU = np.array(self.flatten(tangent_list))
+            if sx is not None:
+                J_dU = self.translate(J_dU, sx)
+        else:
+            if UT is None:
+                raise ValueError(
+                    "tangent_map FD path requires UT = translate(Phi_T(U), sx)")
+            epsilon = ep0 * np.linalg.norm(U) / np.linalg.norm(dU)
+            J_dU = self.evolve(U + epsilon * dU, T)
+            if sx is not None:
+                J_dU = self.translate(J_dU, sx)
+            J_dU = (J_dU - UT) / epsilon
+        return J_dU
+
+    def tangent_map_batch(self, U, dUs, T, sx=None, ep0=1e-7):
+        """Batched tangent map: (Uevol, V) with V[:, i] = J · dUs[:, i].
+
+        JAX backend: one ``jax.linearize`` of ad_evolve at U — a single
+        forward pass whose linearization tape is reused — then a vmapped
+        application to all n tangents.  Memory: the tape is O(Nt x state),
+        like one VJP.  NumPy backend: FD loop over the columns.
+
+        Returns
+        -------
+        Uevol : np.ndarray
+            Untranslated image Φ_T(U) (the next base point).
+        V : np.ndarray, shape (len(U), n)
+            Tangent images (translated by sx if given).
+        """
+        n = dUs.shape[1]
+        V = np.zeros((len(U), n))
+        if JAX_ENABLED:
+            import jax
+            import jax.numpy as jnp
+            f_jax = [jnp.array(f) for f in self.unflatten(U)]
+            primals, f_lin = jax.linearize(
+                lambda f: self.solver.ad_evolve(f, T), f_jax)
+            cols = [self.unflatten(dUs[:, i]) for i in range(n)]
+            batched = [jnp.stack([np.asarray(c[j]) for c in cols])
+                       for j in range(self.solver.num_fields)]
+            tans = jax.vmap(f_lin)(batched)
+            Uevol = np.array(self.flatten(primals))
+            for i in range(n):
+                V[:, i] = self.flatten([np.array(t[i]) for t in tans])
+                if sx is not None:
+                    V[:, i] = self.translate(V[:, i], sx)
+        else:
+            Uevol = self.evolve(U, T)
+            UT = self.translate(Uevol, sx) if sx is not None else Uevol
+            for i in range(n):
+                V[:, i] = self.tangent_map(U, dUs[:, i], T, sx=sx, UT=UT,
+                                           ep0=ep0)
+        return Uevol, V
+
     # -------------------------------------------------------------------------
 
     def phase_shifted_b(self, fields):
@@ -212,21 +296,7 @@ class DynSys():
 
         def apply_J(dU):
             ''' Applies J (jacobian of poincare map) matrix to vector dU  '''
-            if JAX_ENABLED:
-                import jax.numpy as jnp
-                f_jax  = [jnp.array(f) for f in self.unflatten(U)]
-                dU_jax = [jnp.array(d) for d in self.unflatten(dU)]
-                _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
-                J_dU = np.array(self.flatten(tangent_list))
-                if sx is not None:
-                    J_dU = self.translate(J_dU, sx)
-            else:
-                epsilon = ep0 * np.linalg.norm(U) / np.linalg.norm(dU)
-                J_dU = self.evolve(U + epsilon * dU, T)
-                if sx is not None:
-                    J_dU = self.translate(J_dU, sx)
-                J_dU = (J_dU - UT) / epsilon
-            return J_dU
+            return self.tangent_map(U, dU, T, sx=sx, UT=UT, ep0=ep0)
 
         if isinstance(b, str):
             if b == 'U':
@@ -365,26 +435,15 @@ class DynSys():
             if return_hist:
                 le_hist = np.zeros((nsteps, n))
 
-        def apply_J(U, dU, Uevol):
-            "Applies the finite-time tangent map DΦ_T(U) to perturbation dU using finite differences."
-            epsilon = ep0 * np.linalg.norm(U) / np.linalg.norm(dU)
-            U_pert = U + epsilon * dU
-            dUT_dU = self.evolve(U_pert, T) - Uevol
-            if sx is not None:
-                dUT_dU = self.translate(dUT_dU, sx)
-            return dUT_dU / epsilon
-
         # --------------------------------------------------
         # --- MAIN LOOP ------------------------------------
         # --------------------------------------------------
 
         for step in range(start_step, nsteps):
 
-            V = np.zeros_like(Q)
-            Uevol = self.evolve(U, T)
-
-            for i in range(n):
-                V[:, i] = apply_J(U, Q[:, i], Uevol)
+            # batched tangent map: exact linearized pass under JAX,
+            # FD column loop under NumPy (see tangent_map_batch)
+            Uevol, V = self.tangent_map_batch(U, Q, T, sx=sx, ep0=ep0)
 
             Q, R = np.linalg.qr(V)
 
@@ -642,22 +701,12 @@ class UPONewtonSolver(DynSys):
             ''' Applies A (extended Jacobian) to vector X^t  '''
             dU, dT, ds = self.unpack_X(dX)
 
-            if JAX_ENABLED:
-                import jax.numpy as jnp
-                dU_proj = self.sol_project(dU) if self.sp1 else dU
-                f_jax   = [jnp.array(f) for f in self.unflatten(U)]
-                dU_jax  = [jnp.array(d) for d in self.unflatten(dU_proj)]
-                _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
-                dUT_dU = np.array(self.flatten(tangent_list))
-                if self.sx is not None:
-                    dUT_dU = self.translate(dUT_dU, sx)
-            else:
-                epsilon = self.eps0 * self.norm(U) / self.norm(dU)
-                U_pert  = self.apply_proj(U, epsilon * dU, self.sp1)
-                dUT_dU  = self.evolve(U_pert, T)
-                if self.sx is not None:
-                    dUT_dU = self.translate(dUT_dU, sx)
-                dUT_dU  = (dUT_dU - UT) / epsilon
+            # sp1 projects the perturbation *direction* (same semantics in
+            # both backends; the NumPy path previously could project U + dU)
+            dU_in = self.sol_project(dU) if self.sp1 else dU
+            dUT_dU = self.tangent_map(U, dU_in, T,
+                                      sx=sx if self.sx is not None else None,
+                                      UT=UT, ep0=self.eps0)
 
             Tx_proj = np.dot(dU_ds.conj(), dU).real
             t_proj = np.dot(dU_dt.conj(), dU).real
@@ -929,7 +978,13 @@ class ArclengthNewtonSolver(UPONewtonSolver):
             print(content, file=open(path, "a"))
 
     def update_lda(self, lda):
-        '''Updates lambda parameter in solver. norm: normalization parameter'''
+        '''Updates lambda parameter in solver. norm: normalization parameter
+
+        WARNING (JAX backend): mutating a parameter that a jitted ``rkstep``
+        reads from ``self`` (e.g. Kolmogorov nu) is NOT picked up by the
+        cached compiled step -- jit treats self as a static argument.  Under
+        JAX, rebuild the solver instead of mutating it.
+        '''
         if self.solver.solver == 'KolmogorovFlow':
             self.solver.pm.nu = 1 / lda  # Assigning directly to solver's pm since self.pm is removed
         elif self.solver.solver == 'BOUSS':
@@ -978,22 +1033,12 @@ class ArclengthNewtonSolver(UPONewtonSolver):
             ''' Applies A (extended Jacobian) to vector X^t  '''
             dU, dT, ds, dlda_val = self.unpack_X(dX)
 
-            if JAX_ENABLED:
-                import jax.numpy as jnp
-                dU_proj = self.sol_project(dU) if self.sp1 else dU
-                f_jax   = [jnp.array(f) for f in self.unflatten(U)]
-                dU_jax  = [jnp.array(d) for d in self.unflatten(dU_proj)]
-                _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
-                dUT_dU = np.array(self.flatten(tangent_list))
-                if self.sx is not None:
-                    dUT_dU = self.translate(dUT_dU, sx)
-            else:
-                epsilon = self.eps0 * self.norm(U) / self.norm(dU)
-                U_pert  = self.apply_proj(U, epsilon * dU, self.sp1)
-                dUT_dU  = self.evolve(U_pert, T)
-                if self.sx is not None:
-                    dUT_dU = self.translate(dUT_dU, sx)
-                dUT_dU  = (dUT_dU - UT) / epsilon
+            # sp1 projects the perturbation *direction* (same semantics in
+            # both backends; the NumPy path previously could project U + dU)
+            dU_in = self.sol_project(dU) if self.sp1 else dU
+            dUT_dU = self.tangent_map(U, dU_in, T,
+                                      sx=sx if self.sx is not None else None,
+                                      UT=UT, ep0=self.eps0)
 
             Tx_proj = np.dot(dU_ds.conj(), dU).real
             t_proj = np.dot(dU_dt.conj(), dU).real

@@ -70,6 +70,8 @@ class PseudoSpectral(Solver, abc.ABC):
         """JAX-traceable time evolution using lax.scan. No file I/O.
 
         Mirrors evolve() but is differentiable end-to-end with jax.grad/jvp/vjp.
+        Takes the same exact fractional final step as evolve(), so both compute
+        the same map Phi(u, T) for any T, not only multiples of dt.
         Requires JAX backend (NUMPY_BACKEND=jax).
         """
         if not JAX_ENABLED:
@@ -78,18 +80,23 @@ class PseudoSpectral(Solver, abc.ABC):
             )
 
         fields = [self.grid.forward(ff) for ff in fields]
-        Nt = int(T / self.grid.dt)
         dt = self.grid.dt
+        Nt = int(T / dt)
+        dt_last = T - Nt * dt
         rkord = self.rkord
 
-        def step_fn(carry, _):
-            flds = carry
+        def rk(flds, dt_step):
             prev = flds  # immutable JAX arrays; no copy needed
             for oo in range(rkord, 0, -1):
-                flds = self.rkstep(flds, prev, oo, dt)
-            return flds, None
+                flds = self.rkstep(flds, prev, oo, dt_step)
+            return flds
 
-        fields, _ = lax_scan(step_fn, fields, None, length=Nt)
+        fields, _ = lax_scan(lambda carry, _: (rk(carry, dt), None),
+                             fields, None, length=Nt)
+        # dt_last is a plain Python float; keep the check in Python (not xnp)
+        # so the branch resolves at trace time even under jit
+        if abs(dt_last) > 1e-8:
+            fields = rk(fields, dt_last)
         return [self.grid.inverse(ff) for ff in fields]
 
     @abc.abstractmethod

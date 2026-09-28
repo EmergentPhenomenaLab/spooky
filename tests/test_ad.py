@@ -363,3 +363,24 @@ def test_vjp_adjoint_consistency_kolmogorov(kf_setup):
 
     np.testing.assert_allclose(lhs, rhs, rtol=1e-6,
                                err_msg="Adjoint consistency <Jw,z> != <w,J^Tz>")
+
+
+def test_index_update_mask_lowers_to_select(kf_setup):
+    """A full-shape boolean mask must become a select, not a scatter over every
+    True entry (on GPU that scatter cost ~100 ms per call at 128x128, 1000x the
+    rest of the Kolmogorov rkstep), with the same values and gradient."""
+    import jax
+    import jax.numpy as jnp
+    from spooky._backend import index_update
+    grid, _ = kf_setup
+    mask = grid.dealias_modes
+    rng = np.random.default_rng(0)
+    a = jnp.array(rng.standard_normal(mask.shape) + 1j * rng.standard_normal(mask.shape))
+
+    np.testing.assert_array_equal(np.array(index_update(a, mask, 0.0)),
+                                  np.array(a.at[mask].set(0.0)))
+    assert 'scatter' not in str(jax.make_jaxpr(lambda x: index_update(x, mask, 0.0))(a))
+    g = jax.grad(lambda x: jnp.sum(jnp.abs(index_update(x, mask, 0.0)) ** 2))(a)
+    np.testing.assert_allclose(np.array(g)[np.array(mask)], 0.0)
+    # index tuples (zero_mode) still take the .at[] path
+    assert index_update(a, grid.zero_mode, 0.0)[grid.zero_mode] == 0.0

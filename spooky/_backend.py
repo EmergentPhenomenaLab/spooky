@@ -23,6 +23,12 @@ else:
 def _jax_index_update(arr, indices, values=0.0):
     """JAX-specific update (immutable, array.at)."""
     # The 'arr' is guaranteed to be a JAX array here
+    # A full-shape boolean mask (e.g. dealias_modes) lowers to a scatter over
+    # every True entry, which XLA runs ~1000x slower than a select on GPU.
+    if (getattr(indices, 'dtype', None) == bool
+            and getattr(indices, 'shape', None) == arr.shape
+            and xnp.ndim(values) == 0):
+        return xnp.where(indices, values, arr)
     return arr.at[indices].set(values)
 
 def _numpy_index_update(arr, indices, values=0.0):

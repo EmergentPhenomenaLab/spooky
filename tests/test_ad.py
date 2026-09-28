@@ -365,6 +365,46 @@ def test_vjp_adjoint_consistency_kolmogorov(kf_setup):
                                err_msg="Adjoint consistency <Jw,z> != <w,J^Tz>")
 
 
+# ---------------------------------------------------------------------------
+# Checkpointed scan: same values and gradients as the plain scan
+# ---------------------------------------------------------------------------
+
+def test_checkpointed_ad_evolve_matches_plain_kse(kse_setup):
+    """checkpoint_every must not change Phi_T or its gradient (KSE)."""
+    import jax
+    import jax.numpy as jnp
+    grid, solver = kse_setup
+    u0 = jnp.array(_kse_ic(grid))
+    T = 37 * grid.dt          # 37 steps: chunks of 5 leave a remainder of 2
+
+    plain = solver.ad_evolve([u0], T)[0]
+    for ck in (5, 'auto'):
+        out = solver.ad_evolve([u0], T, checkpoint_every=ck)[0]
+        np.testing.assert_allclose(np.array(out), np.array(plain), atol=1e-12)
+
+    g_plain = jax.grad(lambda u: jnp.sum(solver.ad_evolve([u], T)[0] ** 2))(u0)
+    g_ck = jax.grad(lambda u: jnp.sum(solver.ad_evolve([u], T, checkpoint_every=5)[0] ** 2))(u0)
+    np.testing.assert_allclose(np.array(g_ck), np.array(g_plain), rtol=1e-10, atol=1e-12)
+
+
+def test_checkpointed_grad_uses_less_memory_kolmogorov(kf_setup):
+    """Compiled temp memory of the checkpointed gradient must be well below
+    the plain tape for a long scan."""
+    import jax
+    import jax.numpy as jnp
+    grid, solver = kf_setup
+    uu, vv = _kf_ic(grid)
+    f0 = [jnp.array(uu), jnp.array(vv)]
+    T = 400 * grid.dt
+
+    def loss(ck):
+        return jax.jit(jax.grad(lambda f: sum(jnp.sum(o ** 2) for o in solver.ad_evolve(f, T, checkpoint_every=ck))))
+
+    m_plain = loss(None).lower(f0).compile().memory_analysis().temp_size_in_bytes
+    m_ck = loss(20).lower(f0).compile().memory_analysis().temp_size_in_bytes
+    assert m_ck < 0.5 * m_plain, f"checkpointing did not reduce memory: {m_ck} vs {m_plain}"
+
+
 def test_index_update_mask_lowers_to_select(kf_setup):
     """A full-shape boolean mask must become a select, not a scatter over every
     True entry (on GPU that scatter cost ~100 ms per call at 128x128, 1000x the

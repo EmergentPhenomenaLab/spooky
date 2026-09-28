@@ -66,12 +66,15 @@ class PseudoSpectral(Solver, abc.ABC):
 
         return fields
 
-    def ad_evolve(self, fields, T):
+    def ad_evolve(self, fields, T, checkpoint_every=None):
         """JAX-traceable time evolution using lax.scan. No file I/O.
 
         Mirrors evolve() but is differentiable end-to-end with jax.grad/jvp/vjp.
         Takes the same exact fractional final step as evolve(), so both compute
         the same map Phi(u, T) for any T, not only multiples of dt.
+        ``checkpoint_every`` (int or 'auto' = ~sqrt(Nt)) wraps chunks of steps
+        in jax.checkpoint so reverse mode stores ~sqrt(Nt) carries instead of
+        the full per-step tape, at ~2x the forward cost.
         Requires JAX backend (NUMPY_BACKEND=jax).
         """
         if not JAX_ENABLED:
@@ -91,8 +94,24 @@ class PseudoSpectral(Solver, abc.ABC):
                 flds = self.rkstep(flds, prev, oo, dt_step)
             return flds
 
-        fields, _ = lax_scan(lambda carry, _: (rk(carry, dt), None),
-                             fields, None, length=Nt)
+        step = lambda carry, _: (rk(carry, dt), None)
+        if checkpoint_every == 'auto':
+            checkpoint_every = max(1, int(round(Nt ** 0.5)))
+        if checkpoint_every and Nt > checkpoint_every:
+            import jax
+            n_in = int(checkpoint_every)
+            n_out, rem = divmod(Nt, n_in)
+
+            def chunk(carry, _):
+                carry, _ = lax_scan(step, carry, None, length=n_in)
+                return carry, None
+
+            fields, _ = lax_scan(jax.checkpoint(chunk, prevent_cse=False),
+                                 fields, None, length=n_out)
+            if rem:
+                fields, _ = lax_scan(step, fields, None, length=rem)
+        else:
+            fields, _ = lax_scan(step, fields, None, length=Nt)
         # dt_last is a plain Python float; keep the check in Python (not xnp)
         # so the branch resolves at trace time even under jit
         if abs(dt_last) > 1e-8:

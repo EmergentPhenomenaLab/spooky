@@ -23,6 +23,9 @@ class UPOGradientDescent(DynSys):
     ----------
     solver : PseudoSpectral instance
         The PDE solver to wrap.
+    checkpoint_every : int, 'auto' or None
+        Reverse-mode rematerialisation chunk passed to ``ad_evolve``
+        (default 'auto': ~sqrt(number of steps)).
 
     Example
     -------
@@ -32,17 +35,20 @@ class UPOGradientDescent(DynSys):
     >>> U_guess = ds.flatten(fields_guess)
     """
 
-    def __init__(self, solver):
+    def __init__(self, solver, checkpoint_every='auto'):
         super().__init__(solver)
         if not JAX_ENABLED:
             raise RuntimeError(
                 "UPOGradientDescent requires JAX backend (set NUMPY_BACKEND=jax)."
             )
+        #: rematerialisation chunk for the reverse pass ('auto' ~ sqrt(Nt),
+        #: an int, or None for the full tape)
+        self.checkpoint_every = checkpoint_every
 
     def loss(self, fields, T):
         """Normalized periodicity residual ||Φ(u,T) - u||² / ||u||²."""
         import jax.numpy as jnp
-        out = self.solver.ad_evolve(fields, T)
+        out = self.solver.ad_evolve(fields, T, checkpoint_every=self.checkpoint_every)
         res = [o - f for o, f in zip(out, fields)]
         num = sum(jnp.sum(r ** 2) for r in res)
         den = sum(jnp.sum(f ** 2) for f in fields)

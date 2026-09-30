@@ -1002,14 +1002,20 @@ class ArclengthNewtonSolver(UPONewtonSolver):
         WARNING (JAX backend): mutating a parameter that a jitted ``rkstep``
         reads from ``self`` (e.g. Kolmogorov nu) is NOT picked up by the
         cached compiled step -- jit treats self as a static argument.  Under
-        JAX, rebuild the solver instead of mutating it.
+        JAX, rebuild the solver instead of mutating it.  The RB path is safe:
+        ra enters only the implicit operators, which the solver caches per
+        (dt, ra, pr) and passes to its jitted step as traced arguments.
         '''
         if self.solver.solver == 'KolmogorovFlow':
             self.solver.pm.nu = 1 / lda  # Assigning directly to solver's pm since self.pm is removed
         elif self.solver.solver == 'BOUSS':
             self.solver.pm.ra = lda * self.norm_val
+        elif self.solver.solver == 'RayleighBenard2D':
+            # the next evolve builds (or reuses) the operators for the new ra
+            self.solver.ra = lda * self.norm_val
         else:
-            raise Exception('Arclength only implemented for Kolmogorov and BOUSS')
+            raise Exception(
+                'Arclength only implemented for Kolmogorov, BOUSS and RayleighBenard2D')
 
     def N_constraint(self, X, dX_dr, dr, X1):
         """Evaluate arclength constraint N(X) = dX_dr . (X - X1) - dr * alpha^2."""

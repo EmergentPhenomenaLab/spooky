@@ -295,6 +295,80 @@ def test_gradient_descent_reduces_loss_kolmogorov(kf_setup):
     assert loss_f < loss0, f"Loss did not decrease: {loss0:.4e} -> {loss_f:.4e}"
 
 
+def test_ad_evolve_nsteps_matches_default_kse(kse_setup):
+    """nsteps uniform steps of T/nsteps equal the default map when T = nsteps*dt."""
+    import jax.numpy as jnp
+    grid, solver = kse_setup
+    u0 = jnp.array(_kse_ic(grid))
+    n = 50
+    T = n * grid.dt
+    a = solver.ad_evolve([u0], T)[0]
+    b = solver.ad_evolve([u0], T, nsteps=n)[0]
+    np.testing.assert_allclose(np.array(b), np.array(a), atol=1e-12)
+
+
+def test_ad_evolve_grad_wrt_T_matches_fd_kse(kse_setup):
+    """With nsteps fixed, Phi is differentiable in T: jax.grad matches a central FD."""
+    import jax
+    import jax.numpy as jnp
+    grid, solver = kse_setup
+    u0 = jnp.array(_kse_ic(grid))
+    n = 200
+    f = lambda T: jnp.sum(solver.ad_evolve([u0], T, nsteps=n)[0] ** 2)
+    T0, h = 0.2, 1e-6
+    g_ad = float(jax.grad(f)(T0))
+    g_fd = (float(f(T0 + h)) - float(f(T0 - h))) / (2 * h)
+    np.testing.assert_allclose(g_ad, g_fd, rtol=1e-6)
+
+
+def test_run_orbit_frees_T_and_shift_kse(kse_setup):
+    """run_orbit with T and sx free reduces the shift-corrected loss, moves T and sx,
+    keeps T within its bounds, and records one history entry per iteration."""
+    import jax.numpy as jnp
+    from spooky.methods import UPOGradientDescent
+    grid, solver = kse_setup
+    gd = UPOGradientDescent(solver)
+    u0 = jnp.array(_kse_ic(grid))
+    T0, sx0 = 0.5, 0.1
+
+    loss0 = float(gd.loss([u0], T0, sx=sx0, nsteps=int(round(T0 / grid.dt))))
+    fields, T, sx, loss_f, info = gd.run_orbit([u0], T0, sx0=sx0, n_iter=30, verbose=False)
+
+    assert loss_f < loss0, f"Loss did not decrease: {loss0:.4e} -> {loss_f:.4e}"
+    assert T != T0 and sx != sx0
+    assert 0.75 * T0 <= T <= 1.25 * T0
+    assert info['history'][0][0] == pytest.approx(loss0, rel=1e-10)
+    assert len(info['history']) == info['nit'] + 1
+
+
+def test_run_orbit_stays_solenoidal_kolmogorov(kf_setup):
+    """With the default projection run_orbit returns a divergence-free state;
+    without it, gradient descent from the same divergence-free start picks up
+    divergent content (the failure mode the projection removes)."""
+    import jax.numpy as jnp
+    from spooky.methods import UPOGradientDescent
+    grid, solver = kf_setup
+    f0 = [np.array(f) for f in solver.inc_proj([jnp.array(f) for f in _kf_ic(grid)])]
+
+    def div_rel(fields):
+        # spectral divergence on the modes the solver keeps (the Nyquist column,
+        # removed by dealiasing, is where inc_proj is not idempotent through irfft)
+        uh, vh = [np.asarray(grid.forward(jnp.array(f))) for f in fields]
+        kx, ky, keep = np.asarray(grid.kx), np.asarray(grid.ky), ~np.asarray(grid.dealias_modes)
+        div = (kx * uh + ky * vh) * keep
+        ref = np.sqrt(kx ** 2 + ky ** 2) * np.sqrt(np.abs(uh) ** 2 + np.abs(vh) ** 2) * keep
+        return np.linalg.norm(div) / np.linalg.norm(ref)
+
+    gd = UPOGradientDescent(solver)
+    assert gd.project
+    f_p, *_ = gd.run_orbit(f0, 0.5, sx0=0.0, n_iter=10, verbose=False)
+    assert div_rel(f_p) < 1e-12
+
+    gd_raw = UPOGradientDescent(solver, project=False)
+    f_r, *_ = gd_raw.run_orbit(f0, 0.5, sx0=0.0, n_iter=10, verbose=False)
+    assert div_rel(f_r) > 1e-8
+
+
 # ---------------------------------------------------------------------------
 # Lyapunov exponents: JVP-based tangent vs FD tangent
 # ---------------------------------------------------------------------------

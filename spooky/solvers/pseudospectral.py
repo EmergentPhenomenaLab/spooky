@@ -66,7 +66,7 @@ class PseudoSpectral(Solver, abc.ABC):
 
         return fields
 
-    def ad_evolve(self, fields, T, checkpoint_every=None):
+    def ad_evolve(self, fields, T, checkpoint_every=None, nsteps=None):
         """JAX-traceable time evolution using lax.scan. No file I/O.
 
         Mirrors evolve() but is differentiable end-to-end with jax.grad/jvp/vjp.
@@ -75,6 +75,9 @@ class PseudoSpectral(Solver, abc.ABC):
         ``checkpoint_every`` (int or 'auto' = ~sqrt(Nt)) wraps chunks of steps
         in jax.checkpoint so reverse mode stores ~sqrt(Nt) carries instead of
         the full per-step tape, at ~2x the forward cost.
+        ``nsteps`` (int) instead realises T with ``nsteps`` uniform steps of
+        ``T/nsteps`` and no fractional step, so T may be a traced value and
+        Phi is differentiable with respect to it (used to optimise the period).
         Requires JAX backend (NUMPY_BACKEND=jax).
         """
         if not JAX_ENABLED:
@@ -83,9 +86,14 @@ class PseudoSpectral(Solver, abc.ABC):
             )
 
         fields = [self.grid.forward(ff) for ff in fields]
-        dt = self.grid.dt
-        Nt = int(T / dt)
-        dt_last = T - Nt * dt
+        if nsteps is None:
+            dt = self.grid.dt
+            Nt = int(T / dt)
+            dt_last = T - Nt * dt
+        else:
+            Nt = int(nsteps)
+            dt = T / Nt
+            dt_last = 0.0
         rkord = self.rkord
 
         def rk(flds, dt_step):

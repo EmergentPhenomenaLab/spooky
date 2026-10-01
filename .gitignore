@@ -28,3 +28,4 @@ venv/
 examples/**/balance.dat
 examples/**/*.png
 examples/**/output/
+examples/rayleigh_benard/results/

@@ -14,6 +14,7 @@ import pytest
 
 import spooky as sp
 from spooky.solvers import RayleighBenard2D
+from spooky import rb_convert as rc
 
 JAX = os.environ.get('NUMPY_BACKEND', 'numpy').lower() == 'jax'
 
@@ -294,12 +295,6 @@ def test_dynsys_flatten_roundtrip():
         np.testing.assert_allclose(np.asarray(back)[:, 1:-1], orig[:, 1:-1], atol=1e-12)
 
 
-def _quadrature_weights(grid):
-    """sqrt of the interior quadrature weights: |flatten(f)|^2 = <f^2>."""
-    w = np.sqrt(grid.dx * np.asarray(grid.wz)[1:-1] / (grid.Lx * grid.Lz))[None, :]
-    return [w, w, w]
-
-
 def test_dynsys_weights():
     """Weighted flat state: round-trips, |U|^2 is the physical mean square,
     evolve is unchanged, and (JAX) the tangent map is conjugated by the
@@ -307,7 +302,7 @@ def test_dynsys_weights():
     from spooky.methods import DynSys
     grid = sp.Grid2D_wall(2.0, 1.0, 16, 21, 1e-2)
     solver = RayleighBenard2D(grid, ra=3000.0, pr=1.0, bc='no-slip')
-    ds = DynSys(solver, weights=_quadrature_weights(grid))
+    ds = DynSys(solver, weights=rc.quadrature_weights(grid))
     fields = _seed(grid)
     fields[0] = 3.0 * _seed(grid, kc_mode=2, amp=1.0)[2]     # nonzero u, w (zero at walls)
     fields[1] = 0.5 * fields[2]
@@ -347,7 +342,7 @@ def test_newton_steady_roll_weighted_and_plain():
     no_io = {k: None for k in ('output_dir', 'balance_dir', 'newton_dir', 'gmres_dir',
                                'hookstep_dir', 'trust_region_dir', 'apply_A_dir', 'converged_dir')}
     res = {}
-    for name, w in (('plain', None), ('weighted', _quadrature_weights(grid))):
+    for name, w in (('plain', None), ('weighted', rc.quadrature_weights(grid))):
         ns = UPONewtonSolver(solver, T=None, sx=0.0, Tconst=1.0, N_newt=8, N_gmres=60,
                              tol_newt=1e-9, save_outputs='none', save_balance='none',
                              weights=w, **no_io)

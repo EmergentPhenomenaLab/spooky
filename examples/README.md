@@ -7,7 +7,8 @@ the output, and the results it should give.
 | `kse` | forward evolution of the 1D Kuramoto–Sivashinsky equation | runs |
 | `kolmogorov` | forward evolution of 2D Kolmogorov flow | runs |
 | `ad_solver` | JAX only: gradients through the solver, JVP vs finite-difference tangents, Floquet/Lyapunov with exact tangents, gradient-descent orbit seeding | runs |
-| `benchmarks` | cost per time step and memory of the AD paths (Kolmogorov) | runs |
+| `rayleigh_benard` | native 2D Rayleigh–Bénard solver (free-fall units): time marching, SPECTER orbit checks, Newton + Floquet on PO1, DNS Nu(Ra) sweep | runs |
+| `benchmarks` | cost per time step and memory of the native solvers vs SPECTER and Dedalus | runs |
 | `newton_kolmog` | Newton–Krylov–hookstep for a Kolmogorov orbit (orb05) | **out of date** (old API) |
 | `specter_wrapper`, `ghost_wrapper` | time marching and Lyapunov runs through the Fortran codes | `run_evol` as before; `run_lyap` **out of date** |
 

@@ -557,8 +557,6 @@ class UPONewtonSolver(DynSys):
                  tol_newt: float = 1e-5,
                  tol_gmres: float = 1e-3,
                  tol_improve: float = 1e-3,
-                 tol_nudge: float = 1e-3,
-                 frac_nudge: float = 0.,
                  restart_iN: int = 0,
                  eps0: float = 1e-7,
                  mu0: float = 1e-3,
@@ -609,8 +607,6 @@ class UPONewtonSolver(DynSys):
         self.reduc_reg = reduc_reg
         self.mu0 = mu0
         self.mu_inc = mu_inc
-        self.tol_nudge = tol_nudge
-        self.frac_nudge = frac_nudge
         self.tol_newt = tol_newt
         self.tol_improve = tol_improve
         
@@ -760,9 +756,6 @@ class UPONewtonSolver(DynSys):
             H, beta, Q = GMRES(apply_A, b, self.N_gmres, self.tol_gmres, self.gmres_dir, iN)
             X, F_new, UT = self.hookstep(X, H, beta, Q, iN)
             U, T, sx = self.unpack_X(X)
-
-            if ((F-F_new)/F) < self.tol_nudge:
-                U = self.evolve(U, T*self.frac_nudge)
 
             if (F_new < self.tol_newt) and ((F-F_new)/F < self.tol_improve):
                 save_out = True if self.save_outputs in ('all', 'last') else False

@@ -222,6 +222,32 @@ def test_jvp_evolve_compiles_once_per_key_kse(kse_setup, monkeypatch):
     assert len(ds._jvp_cache) == 2
 
 
+def test_tangent_map_batch_matches_columns_kse(kse_setup, monkeypatch):
+    """tangent_map_batch (vmapped JVP, Lyapunov) equals tangent_map column by
+    column and Phi_T(U), with and without a shift, and is compiled once per T:
+    calls at new base points and tangents do not retrace ad_evolve."""
+    from spooky.methods import DynSys
+
+    grid, solver = kse_setup
+    traces = []
+    ad_evolve = solver.ad_evolve
+    monkeypatch.setattr(solver, 'ad_evolve',
+                        lambda f, T, **kw: traces.append(T) or ad_evolve(f, T, **kw))
+    ds = DynSys(solver)
+    rng = np.random.default_rng(3)
+    T = 0.1
+    for k in range(2):
+        U = ds.flatten([_kse_ic(grid) * (1 + 0.1 * k)])
+        Q = rng.standard_normal((len(U), 4))
+        for sx in (None, 0.7):
+            Uevol, V = ds.tangent_map_batch(U, Q, T, sx=sx)
+            np.testing.assert_allclose(Uevol, ds.evolve(U, T), rtol=1e-12, atol=1e-13)
+            for i in range(Q.shape[1]):
+                ref = ds.tangent_map(U, Q[:, i], T, sx=sx)
+                np.testing.assert_allclose(V[:, i], ref, rtol=1e-11, atol=1e-12 * np.abs(ref).max())
+    assert traces.count(T) == 2                              # one batched + one single-tangent trace
+
+
 def test_jvp_matches_fd_kolmogorov(kf_setup):
     """DynSys.jvp_evolve tangent must agree with finite-difference tangent (Kolmogorov)."""
     import jax.numpy as jnp

@@ -122,17 +122,25 @@ class DynSys():
     #: number of compiled JVPs kept by jvp_evolve
     jvp_cache_size = 4
 
-    def _compiled_jvp(self, T):
+    def _compiled_jvp(self, T, batched=False):
         ''' jit((fields, tangents) -> jvp of solver.ad_evolve over T), cached.
-        The key includes ``solver.ad_cache_key()`` (the solver parameters its
-        traced evolution reads), so a parameter change gives a new entry
-        instead of a stale compiled map. '''
-        from .._backend import jit, jvp
-        key = (float(T),) + tuple(self.solver.ad_cache_key())
+        ``batched``: the tangents carry a leading batch axis and the JVP is
+        vmapped over it with the base trajectory left unbatched, so it is
+        computed once and returned without a batch axis.  The key includes
+        ``solver.ad_cache_key()`` (the solver parameters its traced evolution
+        reads), so a parameter change gives a new entry instead of a stale
+        compiled map. '''
+        from .._backend import jit, jvp, vmap
+        key = (bool(batched), float(T)) + tuple(self.solver.ad_cache_key())
         cache = self.__dict__.setdefault('_jvp_cache', OrderedDict())
         if key not in cache:
-            solver, T_ = self.solver, key[0]
-            cache[key] = jit(lambda f, df: jvp(lambda u: solver.ad_evolve(u, T_), (f,), (df,)))
+            solver, T_ = self.solver, key[1]
+            F = lambda u: solver.ad_evolve(u, T_)
+            if batched:
+                fn = lambda f, dfs: vmap(lambda df: jvp(F, (f,), (df,)), out_axes=(None, 0))(dfs)
+            else:
+                fn = lambda f, df: jvp(F, (f,), (df,))
+            cache[key] = jit(fn)
             while len(cache) > self.jvp_cache_size:
                 cache.popitem(last=False)
         cache.move_to_end(key)
@@ -207,10 +215,11 @@ class DynSys():
     def tangent_map_batch(self, U, dUs, T, sx=None, ep0=1e-7):
         """Batched tangent map: (Uevol, V) with V[:, i] = J · dUs[:, i].
 
-        JAX backend: one ``jax.linearize`` of ad_evolve at U — a single
-        forward pass whose linearization tape is reused — then a vmapped
-        application to all n tangents.  Memory: the tape is O(Nt x state),
-        like one VJP.  NumPy backend: FD loop over the columns.
+        JAX backend: one jitted forward pass of the JVP vmapped over the n
+        tangents (base trajectory computed once, tangents propagated together
+        as batched products), compiled once per (T, solver.ad_cache_key()) and
+        cached with ``jvp_evolve``.  Memory: O(n x state) -- no linearization
+        tape.  NumPy backend: FD loop over the columns.
 
         Returns
         -------
@@ -222,15 +231,12 @@ class DynSys():
         n = dUs.shape[1]
         V = np.zeros((len(U), n))
         if JAX_ENABLED:
-            import jax
             import jax.numpy as jnp
             f_jax = [jnp.array(f) for f in self.unflatten(U)]
-            primals, f_lin = jax.linearize(
-                lambda f: self.solver.ad_evolve(f, T), f_jax)
             cols = [self.unflatten(dUs[:, i]) for i in range(n)]
             batched = [jnp.stack([np.asarray(c[j]) for c in cols])
                        for j in range(self.solver.num_fields)]
-            tans = jax.vmap(f_lin)(batched)
+            primals, tans = self._compiled_jvp(T, batched=True)(f_jax, batched)
             Uevol = np.array(self.flatten(primals))
             for i in range(n):
                 V[:, i] = self.flatten([np.array(t[i]) for t in tans])

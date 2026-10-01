@@ -130,6 +130,11 @@ class RayleighBenard2D(IMEXSpectral):
         ''' Thermal diffusivity in free-fall units, Lz^2 / sqrt(Pr Ra). '''
         return self.grid.Lz ** 2 / np.sqrt(self.pr * self.ra)
 
+    def ad_cache_key(self):
+        ''' ad_evolve picks its implicit operators by (dt, ra, pr) at trace
+        time, so compiled JVPs (DynSys.jvp_evolve) must be keyed on ra, pr. '''
+        return (float(self.ra), float(self.pr))
+
     # ------------------------------------------------------------------
     # Precompute (numpy; state-independent operators)
     # ------------------------------------------------------------------

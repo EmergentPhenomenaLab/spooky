@@ -1023,7 +1023,8 @@ class ArclengthNewtonSolver(UPONewtonSolver):
         cached compiled step -- jit treats self as a static argument.  Under
         JAX, rebuild the solver instead of mutating it.  The RB path is safe:
         ra enters only the implicit operators, which the solver caches per
-        (dt, ra, pr) and passes to its jitted step as traced arguments.
+        (dt, ra, pr) and passes to its jitted step as traced arguments, and
+        compiled JVPs are keyed on ``solver.ad_cache_key() = (ra, pr)``.
         '''
         if self.solver.solver == 'KolmogorovFlow':
             self.solver.pm.nu = 1 / lda  # Assigning directly to solver's pm since self.pm is removed

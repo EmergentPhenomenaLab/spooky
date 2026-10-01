@@ -252,6 +252,28 @@ def test_evolve_follows_ra_update():
     np.testing.assert_allclose(np.array(c[2]), np.array(a[2]), atol=1e-13)
 
 
+@pytest.mark.skipif(not JAX, reason="AD tests require NUMPY_BACKEND=jax")
+def test_cached_jvp_follows_ra_update():
+    """DynSys caches its compiled JVP per (T, solver.ad_cache_key()); changing
+    solver.ra must compile a new map with the new operators, not reuse the
+    old one."""
+    import jax.numpy as jnp
+    from spooky.methods import DynSys
+    grid = sp.Grid2D_wall(2.0, 1.0, 16, 25, 1e-2)
+    solver = RayleighBenard2D(grid, ra=3000.0, pr=1.0, bc='no-slip')
+    ds = DynSys(solver)
+    f0 = [jnp.array(a) for a in _seed(grid)]
+    df = [jnp.array(a) for a in _seed(grid, kc_mode=2, amp=1.0)]
+    a = ds.jvp_evolve(f0, df, 0.5)[1]
+    solver.ra = 6000.0
+    b = ds.jvp_evolve(f0, df, 0.5)[1]
+    ref = DynSys(RayleighBenard2D(grid, ra=6000.0, pr=1.0, bc='no-slip')).jvp_evolve(f0, df, 0.5)[1]
+    assert np.max(np.abs(np.array(a[2]) - np.array(b[2]))) > 1e-6
+    for x, y in zip(b, ref):
+        np.testing.assert_allclose(np.array(x), np.array(y), rtol=0, atol=1e-13)
+    assert len(ds._jvp_cache) == 2
+
+
 # DynSys integration (wall-bounded remove_boundary path)
 # ---------------------------------------------------------------------------
 
@@ -313,9 +335,6 @@ def test_dynsys_weights():
         np.testing.assert_allclose(lhs, rhs, rtol=1e-9, atol=1e-11 * np.abs(rhs).max())
 
 
-@pytest.mark.skipif(JAX, reason="~200 s under JAX: tangent_map recompiles its JVP on every "
-                                "GMRES iteration (no jit cache); the DynSys plumbing tested "
-                                "here is backend-independent")
 def test_newton_steady_roll_weighted_and_plain():
     """UPONewtonSolver on the steady roll at Ra = 3000 (fixed point of the
     T = 1 map, x-shift free): converges with and without quadrature weights

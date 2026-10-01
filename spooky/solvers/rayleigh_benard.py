@@ -151,10 +151,11 @@ class RayleighBenard2D(IMEXSpectral):
         eN = np.zeros(Nz);  eN[Nz - 1] = 1.0
 
         # --- lam- and parameter-independent operators ---------------------
-        SLp = np.zeros((Nkx, Nz, Nz), dtype=complex)   # particular pressure-Poisson
-        phi0 = np.zeros((Nkx, Nz), dtype=complex)      # wall-pressure influence fns
-        phiN = np.zeros((Nkx, Nz), dtype=complex)
-        SProj = np.zeros((Nkx, Nz, Nz), dtype=complex)  # Leray (Neumann) projection
+        # (real: L = D2 - k^2 I is real; see _solve for the complex apply)
+        SLp = np.zeros((Nkx, Nz, Nz))                  # particular pressure-Poisson
+        phi0 = np.zeros((Nkx, Nz))                     # wall-pressure influence fns
+        phiN = np.zeros((Nkx, Nz))
+        SProj = np.zeros((Nkx, Nz, Nz))                # Leray (Neumann) projection
 
         for i in range(Nkx):
             k = kx[i]
@@ -184,9 +185,10 @@ class RayleighBenard2D(IMEXSpectral):
         self._ops_cache = OrderedDict()
         self._ops_for(dt)
 
-    #: number of per-dt operator sets kept (each is ~0.16 GB at 256x97,
-    #: 2.2 GB at 512x257); a Newton run needs grid.dt, the current T and a
-    #: few hookstep trial T's at once
+    #: number of per-dt operator sets kept (each is 0.06 GB at 256x97 and
+    #: 0.82 GB at 512x257 for SBDF2, on top of 0.02 / 0.27 GB of fixed SLp and
+    #: SProj); a Newton run needs grid.dt, the current T and a few hookstep
+    #: trial T's at once
     ops_cache_size = 4
 
     def _ops_for(self, dt):
@@ -219,9 +221,11 @@ class RayleighBenard2D(IMEXSpectral):
         D, D2, Iz, kx, Z = o['D'], o['D2'], o['Iz'], o['kx'], o['Z']
         b0, b1 = 0, Nz - 1
 
-        SHu = np.zeros((Nkx, Nz, Nz), dtype=complex)   # u Helmholtz solve (BC per self.bc)
-        SHw = np.zeros((Nkx, Nz, Nz), dtype=complex)   # w Helmholtz solve (Dirichlet)
-        SHt = np.zeros((Nkx, Nz, Nz), dtype=complex)   # temperature Helmholtz solve
+        # Helmholtz solves are real (lam, nu, kappa, L real); only the
+        # wall-pressure responses carry the factor ik
+        SHu = np.zeros((Nkx, Nz, Nz))                  # u Helmholtz solve (BC per self.bc)
+        SHw = np.zeros((Nkx, Nz, Nz))                  # w Helmholtz solve (Dirichlet)
+        SHt = np.zeros((Nkx, Nz, Nz))                  # temperature Helmholtz solve
         Util = np.zeros((Nkx, 2, Nz), dtype=complex)   # u-response to wall pressure
         Wtil = np.zeros((Nkx, 2, Nz), dtype=complex)   # w-response to wall pressure
         Minv = np.zeros((Nkx, 2, 2), dtype=complex)    # inverse influence matrix
@@ -278,8 +282,13 @@ class RayleighBenard2D(IMEXSpectral):
     # ------------------------------------------------------------------
     @staticmethod
     def _solve(op, rhs):
-        ''' Batched per-mode linear apply: op (Nkx,Nz,Nz) on rhs (Nkx,Nz). '''
-        return xnp.einsum('mij,mj->mi', op, rhs)
+        ''' Batched per-mode apply of a real operator op (Nkx,Nz,Nz) to a
+        complex rhs (Nkx,Nz): one real batched matmul on [Re, Im] (half the
+        flops and operator memory of a complex matmul; a plain einsum would
+        promote op to complex). '''
+        ri = xnp.stack([rhs.real, rhs.imag], axis=-1)          # (Nkx,Nz,2)
+        out = op @ ri
+        return out[..., 0] + 1j * out[..., 1]
 
     def _dz(self, fhat):
         return fhat @ self.D.T

@@ -272,6 +272,82 @@ def test_dynsys_flatten_roundtrip():
         np.testing.assert_allclose(np.asarray(back)[:, 1:-1], orig[:, 1:-1], atol=1e-12)
 
 
+def _quadrature_weights(grid):
+    """sqrt of the interior quadrature weights: |flatten(f)|^2 = <f^2>."""
+    w = np.sqrt(grid.dx * np.asarray(grid.wz)[1:-1] / (grid.Lx * grid.Lz))[None, :]
+    return [w, w, w]
+
+
+def test_dynsys_weights():
+    """Weighted flat state: round-trips, |U|^2 is the physical mean square,
+    evolve is unchanged, and (JAX) the tangent map is conjugated by the
+    weights: tangent_map_w(W U, W dU) = W tangent_map(U, dU)."""
+    from spooky.methods import DynSys
+    grid = sp.Grid2D_wall(2.0, 1.0, 16, 21, 1e-2)
+    solver = RayleighBenard2D(grid, ra=3000.0, pr=1.0, bc='no-slip')
+    ds = DynSys(solver, weights=_quadrature_weights(grid))
+    fields = _seed(grid)
+    fields[0] = 3.0 * _seed(grid, kc_mode=2, amp=1.0)[2]     # nonzero u, w (zero at walls)
+    fields[1] = 0.5 * fields[2]
+    U = ds.flatten(fields)
+    for back, orig in zip(ds.unflatten(U), fields):
+        assert np.max(np.abs(back[:, [0, -1]])) == 0.0
+        np.testing.assert_allclose(back[:, 1:-1], orig[:, 1:-1], rtol=1e-12)
+    ms = sum(float(grid.average(f ** 2)) for f in fields)
+    np.testing.assert_allclose(np.dot(U, U), ms, rtol=1e-12)
+
+    out = ds.unflatten(ds.evolve(U, 0.5))
+    ref = solver.evolve([np.array(f) for f in fields], T=0.5, write_outputs=False)
+    for a, b in zip(out, ref):
+        np.testing.assert_allclose(a[:, 1:-1], np.asarray(b)[:, 1:-1], rtol=1e-12, atol=1e-15)
+
+    if JAX:
+        ds0 = DynSys(solver)
+        U0 = ds0.flatten(fields)
+        pert = _seed(grid, kc_mode=2, amp=1.0)
+        pert[1] = pert[2] * 3.0
+        dU0 = ds0.flatten(pert)
+        W = ds.flatten(ds0.unflatten(np.ones_like(U0)))         # the diagonal weights
+        lhs = ds.tangent_map(U, W * dU0, 0.5)
+        rhs = W * ds0.tangent_map(U0, dU0, 0.5)
+        np.testing.assert_allclose(lhs, rhs, rtol=1e-9, atol=1e-11 * np.abs(rhs).max())
+
+
+@pytest.mark.skipif(JAX, reason="~200 s under JAX: tangent_map recompiles its JVP on every "
+                                "GMRES iteration (no jit cache); the DynSys plumbing tested "
+                                "here is backend-independent")
+def test_newton_steady_roll_weighted_and_plain():
+    """UPONewtonSolver on the steady roll at Ra = 3000 (fixed point of the
+    T = 1 map, x-shift free): converges with and without quadrature weights
+    to the same state up to translation; run_newton returns the final X and
+    calls on_iteration after every accepted step."""
+    from spooky.methods import UPONewtonSolver
+    grid = sp.Grid2D_wall(2.0, 1.0, 16, 17, 0.05)
+    solver = RayleighBenard2D(grid, ra=3000.0, pr=1.0, bc='no-slip')
+    f0 = solver.evolve(_seed(grid, amp=0.05), T=15.0, write_outputs=False)
+    no_io = {k: None for k in ('output_dir', 'balance_dir', 'newton_dir', 'gmres_dir',
+                               'hookstep_dir', 'trust_region_dir', 'apply_A_dir', 'converged_dir')}
+    res = {}
+    for name, w in (('plain', None), ('weighted', _quadrature_weights(grid))):
+        ns = UPONewtonSolver(solver, T=None, sx=0.0, Tconst=1.0, N_newt=8, N_gmres=60,
+                             tol_newt=1e-9, save_outputs='none', save_balance='none',
+                             weights=w, **no_io)
+        log = []
+        X = ns.run_newton(ns.form_X(ns.flatten(f0), None, 0.0),
+                          on_iteration=lambda iN, X, F: log.append((iN, F, X.copy())))
+        U, T, sx = ns.unpack_X(X)
+        UT = ns.translate(ns.evolve(U, T), sx)
+        assert np.linalg.norm(UT - U) < 1e-12 * np.linalg.norm(U)
+        assert [it[0] for it in log] == list(range(1, len(log) + 1))
+        assert log[0][1] > 1e3 * log[3][1]                       # fast (quadratic) decrease
+        res[name] = ns.unflatten(U)
+    nu = [float(solver.nusselt(res[k])) for k in ('plain', 'weighted')]
+    np.testing.assert_allclose(nu[1], nu[0], rtol=1e-10)
+    for a, b in zip(res['plain'], res['weighted']):              # x-translation invariant
+        A, B = np.abs(grid.forward(a)), np.abs(grid.forward(b))
+        np.testing.assert_allclose(B, A, rtol=0, atol=1e-9 * A.max())
+
+
 def test_incompressibility_projection():
     grid = sp.Grid2D_wall(2.0, 1.0, 16, 25, 1e-2)
     solver = RayleighBenard2D(grid, ra=2000.0, pr=1.0, bc='no-slip')

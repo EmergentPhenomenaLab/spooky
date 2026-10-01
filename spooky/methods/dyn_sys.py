@@ -20,38 +20,50 @@ class DynSys():
     ----------
     solver: Solver instance
         Solver to be used.
+    weights: sequence or None, optional
+        Per-field weights (scalars or arrays broadcastable to the flattened
+        field shape, i.e. the interior ``(Nx, Nz-2)`` on wall-bounded grids)
+        applied by ``flatten`` and removed by ``unflatten``.  The flat state is
+        ``w_i * f_i``, so Euclidean inner products on flat vectors -- the ones
+        Newton/GMRES/hookstep/Arnoldi/arclength use -- become weighted ones:
+        e.g. the square root of the quadrature weights makes |U|^2 the
+        physical mean-square norm on a Chebyshev grid.  The tangent map is
+        conjugated by the same diagonal scaling, which leaves Floquet
+        multipliers (and periodic orbits) unchanged.  Default: unweighted.
     """
-    def __init__(self, solver):
+    def __init__(self, solver, weights=None):
         self.solver = solver
         self.grid = solver.grid
+        self.weights = None if weights is None else [np.asarray(w, dtype=float) for w in weights]
 
         # Wall-bounded grids carry interior-only state for the UPO/Floquet
         # machinery: the Dirichlet boundary rows are stripped on flatten and
         # re-padded with zeros on unflatten. Grids advertise this via a
-        # ``remove_boundary`` attribute (e.g. Grid2D_semi).
+        # ``remove_boundary`` attribute (Grid2D_semi, Grid2D_wall).
         self.remove_boundary = getattr(self.grid, 'remove_boundary', False)
         if isinstance(self.grid, ps.Grid2D_semi):
             self.remove_boundary = True
 
     def flatten(self, fields):
-        '''Flattens fields'''
-        if not self.remove_boundary:
-            return np.concatenate([f.flatten() for f in fields])
-        else:
-            return np.concatenate([f[:,1:-1].flatten() for f in fields])
+        '''Flattens fields (interior only on wall-bounded grids; weighted if
+        ``weights`` were given)'''
+        parts = [np.asarray(f) if not self.remove_boundary else np.asarray(f)[:, 1:-1]
+                 for f in fields]
+        if self.weights is not None:
+            parts = [w * p for w, p in zip(self.weights, parts)]
+        return np.concatenate([p.ravel() for p in parts])
 
     def unflatten(self, U):
-        '''Unflatten fields'''
+        '''Unflatten fields (removes the weights; re-pads the wall rows with zeros)'''
         ll = len(U)//self.solver.num_fields
         fields = [U[i*ll:(i+1)*ll] for i in range(self.solver.num_fields)]
-        if not self.remove_boundary:
-            fields = [f.reshape(self.grid.shape) for f in fields]
-            return fields
-        else:
-            trim_shape = (self.grid.Nx, self.grid.Nz-2)
-            trim_fields = [f.reshape(trim_shape) for f in fields]
-            fields = [np.pad(f, pad_width = ((0,0),(1,1))) for f in trim_fields] #pads second dimension with zeros before and after
-            return fields
+        shape = self.grid.shape if not self.remove_boundary else (self.grid.Nx, self.grid.Nz-2)
+        fields = [f.reshape(shape) for f in fields]
+        if self.weights is not None:
+            fields = [f / w for f, w in zip(fields, self.weights)]
+        if self.remove_boundary:
+            fields = [np.pad(f, pad_width = ((0,0),(1,1))) for f in fields] #pads second dimension with zeros before and after
+        return fields
 
     def flatten_dec(func):
         """Decorator that allows to work with flattened fields U instead of fields"""
@@ -276,7 +288,7 @@ class DynSys():
         v_proj = self.grid.inverse(v_proj_hat)
         fields_proj = [u_proj, v_proj]
 
-        b_vector = self.flatten([f.flatten() for f in fields_proj])
+        b_vector = self.flatten(fields_proj)
         return b_vector
 
     def floquet_multipliers(self, fields, T, n, tol, ep0=1e-7, sx=None, b='U', test=False):
@@ -583,10 +595,11 @@ class UPONewtonSolver(DynSys):
                  hookstep_dir: str = 'hookstep',
                  trust_region_dir: str = 'trust_region',
                  apply_A_dir: str = 'apply_A',
-                 converged_dir: str = 'converged'
+                 converged_dir: str = 'converged',
+                 weights=None,
                  ):
 
-        super().__init__(solver)
+        super().__init__(solver, weights=weights)
         
         # System parameters
         self.T = T
@@ -745,8 +758,11 @@ class UPONewtonSolver(DynSys):
 
         return apply_A, UT
 
-    def run_newton(self, X):
-        """Run Newton-Krylov iterations starting from state X until convergence."""
+    def run_newton(self, X, on_iteration=None):
+        """Run Newton-Krylov iterations starting from state X until convergence;
+        returns the last state X = (U, T, sx).  ``on_iteration(iN, X, F)`` is
+        called after each accepted hookstep with the new state and residual
+        norm (e.g. to checkpoint X; resume with ``restart_iN=iN``)."""
         if self.restart_iN == 0:
             self.write_header_newton()
 
@@ -762,6 +778,8 @@ class UPONewtonSolver(DynSys):
             H, beta, Q = GMRES(apply_A, b, self.N_gmres, self.tol_gmres, self.gmres_dir, iN)
             X, F_new, UT = self.hookstep(X, H, beta, Q, iN)
             U, T, sx = self.unpack_X(X)
+            if on_iteration is not None:
+                on_iteration(iN, X, F_new)
 
             if (F_new < self.tol_newt) and ((F-F_new)/F < self.tol_improve):
                 save_out = True if self.save_outputs in ('all', 'last') else False
@@ -773,6 +791,7 @@ class UPONewtonSolver(DynSys):
                 F = self.norm(b)
                 self.write_newton(iN+1, F, U, sx, T)
                 break
+        return X
 
     def hookstep(self, X, H, beta, Q, iN):
         """Perform trust-region hookstep update; shrinks step until residual improvement is linear."""

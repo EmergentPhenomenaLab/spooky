@@ -2,6 +2,7 @@ from .krylov import GMRES, backsub, arnoldi_eig
 import os
 import numpy as np
 import functools
+from collections import OrderedDict
 
 from .. import pseudo as ps
 from .._backend import JAX_ENABLED
@@ -110,13 +111,32 @@ class DynSys():
             Evolved fields Φ(fields, T).
         tangents : list of arrays
             Tangent output J·v where J = dΦ/d(fields).
+
+        The JVP is jitted once per ``(T, solver.ad_cache_key())`` and cached
+        (``jvp_cache_size`` entries), so repeated calls at the same T -- every
+        GMRES or Arnoldi iteration -- reuse one compilation instead of
+        retracing the whole time loop.
         """
-        from .._backend import jvp
-        primals, tangents = jvp(
-            lambda f: self.solver.ad_evolve(f, T),
-            (fields,), (tangent_fields,)
-        )
-        return primals, tangents
+        return self._compiled_jvp(T)(fields, tangent_fields)
+
+    #: number of compiled JVPs kept by jvp_evolve
+    jvp_cache_size = 4
+
+    def _compiled_jvp(self, T):
+        ''' jit((fields, tangents) -> jvp of solver.ad_evolve over T), cached.
+        The key includes ``solver.ad_cache_key()`` (the solver parameters its
+        traced evolution reads), so a parameter change gives a new entry
+        instead of a stale compiled map. '''
+        from .._backend import jit, jvp
+        key = (float(T),) + tuple(self.solver.ad_cache_key())
+        cache = self.__dict__.setdefault('_jvp_cache', OrderedDict())
+        if key not in cache:
+            solver, T_ = self.solver, key[0]
+            cache[key] = jit(lambda f, df: jvp(lambda u: solver.ad_evolve(u, T_), (f,), (df,)))
+            while len(cache) > self.jvp_cache_size:
+                cache.popitem(last=False)
+        cache.move_to_end(key)
+        return cache[key]
 
     def vjp_evolve(self, fields, cotangent_fields, T):
         """Reverse-mode AD: adjoint action J^T·v on field lists.

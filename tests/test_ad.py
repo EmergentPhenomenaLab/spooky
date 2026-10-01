@@ -187,6 +187,41 @@ def test_jvp_matches_fd_kse(kse_setup):
     )
 
 
+def test_jvp_evolve_compiles_once_per_key_kse(kse_setup, monkeypatch):
+    """jvp_evolve jits the JVP once per (T, solver.ad_cache_key()): repeated
+    calls (GMRES/Arnoldi) do not retrace ad_evolve, the result equals the
+    eager jax.jvp, a new T or solver key compiles a new entry, and the cache
+    is bounded by jvp_cache_size."""
+    import jax
+    import jax.numpy as jnp
+    from spooky.methods import DynSys
+
+    grid, solver = kse_setup
+    traces = []
+    ad_evolve = solver.ad_evolve
+    monkeypatch.setattr(solver, 'ad_evolve',
+                        lambda f, T, **kw: traces.append(T) or ad_evolve(f, T, **kw))
+    ds = DynSys(solver)
+    u0 = [jnp.array(_kse_ic(grid))]
+    rng = np.random.default_rng(1)
+    dus = [[jnp.array(rng.standard_normal(u0[0].shape))] for _ in range(3)]
+
+    outs = [ds.jvp_evolve(u0, du, 0.1)[1] for du in dus]
+    assert traces == [0.1]                                   # traced once, reused twice
+    for du, out in zip(dus, outs):
+        _, ref = jax.jvp(lambda f: ad_evolve(f, 0.1), (u0,), (du,))
+        np.testing.assert_allclose(np.array(out[0]), np.array(ref[0]), rtol=1e-12, atol=1e-14)
+
+    ds.jvp_evolve(u0, dus[0], 0.2)
+    monkeypatch.setattr(solver, 'ad_cache_key', lambda: ('changed',))
+    ds.jvp_evolve(u0, dus[0], 0.1)
+    assert traces == [0.1, 0.2, 0.1] and len(ds._jvp_cache) == 3
+
+    ds.jvp_cache_size = 2
+    ds.jvp_evolve(u0, dus[0], 0.3)
+    assert len(ds._jvp_cache) == 2
+
+
 def test_jvp_matches_fd_kolmogorov(kf_setup):
     """DynSys.jvp_evolve tangent must agree with finite-difference tangent (Kolmogorov)."""
     import jax.numpy as jnp

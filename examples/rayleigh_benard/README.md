@@ -113,6 +113,36 @@ smaller than free-fall ones):
 - Stable up to `dt ≈ 3e-3` at `Nx = 256` and `< 2e-3` at `Nx = 512`. So implicit time stepping
   gives **no** `dt` advantage over SPECTER at equal `Nx`.
 
+**Free-fall results** (2026-10-01, L4, job 45106, PO1 at Ra = 1.9977e7, T = 10.8313;
+`/share/data4/jcullen/rb_bench/item34/bench-gpu-ff-45106.out`):
+
+| dt | residual (all three Nz) | Nu(T) |
+|---|---|---|
+| 5e-4 | 5.529e-5 | 10.5595 |
+| 1e-3 | 5.675e-5 | 10.5599 |
+| 2e-3 | 1.165e-4 | 10.5616 |
+| 4e-3, 8e-3, 1.6e-2 | NaN (unstable) | |
+
+- `Nz = 97`, `129` and `193` give the same residual and Nu to all printed digits at every `dt`.
+- The floor (~5.5e-5) is the interpolation plus code-difference error; `dt = 2e-3` doubles it, and the
+  stability limit at `Nx = 256` lies between 2e-3 and 4e-3. Production `dt = 2e-3` is therefore within
+  a factor < 2 of the limit at Ra ≈ 2e7.
+
+**Converged-orbit resolution check** (2026-10-01, PO4 at Ra = 1.4e7, T ≈ 1.623; native Newton to
+3e-11 and Floquet n = 40 on each grid; `/share/data4/jcullen/RB_native/ra1.4e7/*/po4_rescheck_*`):
+
+| grid, dt | T | Nu | leading pair \|mu\| |
+|---|---|---|---|
+| 256×97, 2e-3 | 1.622914574 | 15.881123 | 1.076549 |
+| 256×97, 1.5e-3 | 1.622925411 | 15.880942 | 1.076560 |
+| 384×129, 1.5e-3 | 1.622925032 | 15.880939 | 1.076559 |
+
+- Grid 256×97 → 384×129 at equal dt: T changes by 2e-7 (relative), Nu by 2e-7, the multipliers
+  by ~1e-6.
+- dt 1.5e-3 → 2e-3: T changes by 7e-6, Nu by 1e-5, |mu| by 1e-5. The time step, not the grid,
+  dominates the error, and both are far below what matters for identifying orbits.
+- SPECTER (512², dt 1e-3) has T = 1.622939, 8e-6 away.
+
 ### `newton_po1.py` (+ `job_newton_po1.sh`, `job_newton_po1_ra.sh`): converge a periodic orbit natively, then Floquet
 
 Starts from one Newton iteration of a SPECTER run (`--ref <run dir>`, `--iN`, default the last),
@@ -161,8 +191,17 @@ Output directory `--out`:
 - **Floquet at 2e7:** matches SPECTER to ~1e-4 for the leading multiplier (22.136 vs 22.134).
 - **Use `n >= 40`.** With `n = 20` the weaker multipliers aren't converged: two 1.7e7 runs agree
   except for the 4th (5.01 vs 5.63).
-- **Validation 3** (this solver, both norms, Ra = 1.9e7, Floquet `n = 40`) is in
-  `/share/data4/jcullen/rb_bench/val3/`.
+- **Validation 3** (this solver, Ra = 1.9e7, 256×97, dt = 2e-3, Floquet `n = 40`, 2026-10-01;
+  `/share/data4/jcullen/rb_bench/val3/`): from the SPECTER orbit (iN 16) both norms converge in
+  **3 iterations** (~14.5 min on an L4) to the same orbit, T = 10.7808887.
+  - Quadrature: 3.8e-6 → 4.4e-9 → 1.9e-11, GMRES 40/43/55 vectors.
+  - Plain: 3.7e-6 → 7.9e-9 → 7.0e-12, GMRES 42/41/53 vectors.
+  - Floquet multipliers agree between the norms to 1e-7. Against SPECTER `floq_n100`, the 13 leading
+    multipliers agree to 0.04–0.8 % (24.53 vs 24.47, |11.30| vs |11.28|, 5.458 vs 5.456, ...).
+  - From the 14th on, n = 40 is **not converged** (native 1.0025 vs SPECTER 1.33): this orbit has 22
+    unstable multipliers. Counting unstable directions needs `n` well above that count; check by
+    comparing two values of `n`.
+  - Default norm stays `quadrature`: same cost, and it is the physical norm, independent of the grid.
 
 ### `nu_sweep.py` (+ `job_nu_sweep.sh`, `nu_sweep_compare.py`): long-time Nu(Ra) from DNS
 
@@ -207,7 +246,10 @@ standard errors (10 blocks).
 | 1e7 | 14.204 | 14.20 | |
 | 2e7 | 16.94 | 17.02 | |
 
-KE agrees within 1%. The free-fall rerun is in `/share/data4/jcullen/rb_bench/item34/nusweep/`.
+KE agrees within 1%. The free-fall rerun (2026-10-01, job 45107, `/share/data4/jcullen/rb_bench/item34/nusweep/`)
+reproduces this table: 4.9943, 5.9721, 6.6146, 7.0712 (4e5), 7.4991, 7.5938 (1e6), 9.0564, 11.3784, 14.2007,
+16.9385. Against the long-time SPECTER flux values it is within 0.0–0.1 %, except 4e5 (−0.4 %, slow
+transient) and 5e6 at 256-103 (−0.3 %; the 256-231 run agrees to 0.0 %).
 
 ### `specter_nu_series.py`: long-time Nu and KE of a SPECTER run
 

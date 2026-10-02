@@ -77,6 +77,26 @@ real-valued operators) are kept in the local `AD-diffusive` branch under
 | L4 | 1.11 ms | 7.31 ms | 12.2 ms |
 | JAX CPU (c3, 10 cores) | 25 ms | 142 ms | — |
 
+**Full L4 run** (2026-10-01, job 45106, `job_bench_gpu.sh`; `/share/data4/jcullen/rb_bench/item34/bench-gpu-ff-45106.out`),
+ms/step:
+
+| native RB, float64 | fwd | jvp | grad | grad tape |
+|---|---|---|---|---|
+| 128×65 | 0.38 | 0.62 | 0.77 | 0.56 MB/step |
+| 256×97 | 0.68 | 1.11 | 1.39 | 1.63 MB/step |
+| 256×129 | 1.31 | 1.64 | 2.63 | 2.16 MB/step |
+| 512×193 | 3.88 | 7.31 | 7.75 | 6.43 MB/step |
+| 512×257 | 6.12 | 12.18 | 12.31 | 8.56 MB/step |
+
+float32 is 4–8× faster (256×129: 0.17 fwd / 0.33 jvp; 512×257: 1.46 / 2.88). Kolmogorov float64:
+0.38 / 0.73 (64²) to 7.9 / 16.1 (1024²) fwd / jvp; reverse mode over 200 steps does not fit in the
+L4's 23 GB at 1024² and above.
+
+**Batched tangent map** (Lyapunov, RB 256×97, L4, job 45108, `/share/data4/jcullen/rb_bench/lyap/`):
+one QR interval (T = 1, 500 steps) costs 0.19 s per tangent vector for n = 20, 40 and 80, i.e.
+0.34× one unbatched JVP; peak device memory 0.25 / 0.43 / 0.54 GB (the old `jax.linearize` path
+needed 0.89 GB of compiled temporaries for n = 20).
+
 **Older comparison** (2026-09-21, diffusive solver, before the real-valued operators), in ms/step:
 
 | code | 256-class grid | 512-class grid |

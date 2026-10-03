@@ -581,6 +581,8 @@ class UPONewtonSolver(DynSys):
                  mu_inc: float = 2.0,
                  c: float = 0.5,
                  reduc_reg: float = 0.5,
+                 mu_search: bool = False,
+                 delta_inc: float = 2.0,
                  sp1: bool = False,
                  sp2: bool = False,
                  sp_dU: bool = False,
@@ -626,6 +628,10 @@ class UPONewtonSolver(DynSys):
         self.reduc_reg = reduc_reg
         self.mu0 = mu0
         self.mu_inc = mu_inc
+        # mu_search: solve the trust-region subproblem for |y| ~ Delta and keep Delta between Newton iterations
+        self.mu_search = mu_search
+        self.delta_inc = delta_inc
+        self._Delta_prev = None
         self.tol_newt = tol_newt
         self.tol_improve = tol_improve
         
@@ -765,6 +771,7 @@ class UPONewtonSolver(DynSys):
         norm (e.g. to checkpoint X; resume with ``restart_iN=iN``)."""
         if self.restart_iN == 0:
             self.write_header_newton()
+        self._Delta_prev = None
 
         for iN in range(self.restart_iN+1, self.N_newt):
             U, T, sx = self.unpack_X(X)
@@ -797,10 +804,9 @@ class UPONewtonSolver(DynSys):
         """Perform trust-region hookstep update; shrinks step until residual improvement is linear."""
         U, T, sx = self.unpack_X(X)
         y = backsub(H, beta)
-        Delta = self.norm(y)
         trust_region = self.trust_region_function(H, beta, iN, y)
 
-        mu = 0.
+        Delta, mu = self.hook_start(y)
         for iH in range(self.N_hook):
             y, mu = trust_region(Delta, mu)
             dx = Q@y
@@ -825,19 +831,69 @@ class UPONewtonSolver(DynSys):
                 break
             else:
                 Delta *= self.reduc_reg
+        self.hook_done(y, iH)
         return X_new, F_new, UT
 
+    def hook_start(self, y0):
+        """Initial (Delta, mu) of a hookstep.  mu = 0 means: try the full Newton step y0 first.
+        With ``mu_search``, Delta is capped by the radius kept from the previous Newton iteration."""
+        Delta = self.norm(y0)
+        if self.mu_search and self._Delta_prev is not None and self._Delta_prev < Delta:
+            return self._Delta_prev, self.mu0
+        return Delta, 0.
+
+    def hook_done(self, y, iH):
+        """With ``mu_search``, keep the accepted |y| as the next radius, enlarged by ``delta_inc`` if the
+        first trial was accepted."""
+        if self.mu_search:
+            self._Delta_prev = self.norm(y) * (self.delta_inc if iH == 0 else 1.)
+
+    def search_mu(self, y_of, Delta, s, rtol=0.1, n_bisect=60):
+        """mu > 0 with (1 - rtol) Delta <= |y(mu)| <= Delta, by bisection in log(mu) (|y(mu)| decreases
+        with mu).  s: singular values of R, setting the scale of mu."""
+        lo, hi = 1e-16 * s[0]**2, s[0]**2
+        if self.norm(y_of(lo)) <= Delta:
+            return lo
+        while self.norm(y_of(hi)) > Delta:
+            lo, hi = hi, 10 * hi
+        for _ in range(n_bisect):
+            mid = np.sqrt(lo * hi)
+            y_norm = self.norm(y_of(mid))
+            if y_norm > Delta:
+                lo = mid
+            else:
+                hi = mid
+                if y_norm >= (1 - rtol) * Delta:
+                    break
+        return hi
+
     def trust_region_function(self, H, beta, iN, y0, iA: int | None = None):
-        """Return a closure that solves the trust-region subproblem (A + mu*I)y = b."""
+        """Return a closure that solves the trust-region subproblem (A + mu*I)y = b.
+
+        Default: mu starts at ``mu0`` and grows by ``mu_inc`` until |y| <= Delta, so |y| can end far below
+        Delta when A is nearly singular.  With ``mu_search``, mu is chosen so that |y| ~ Delta, using the
+        SVD of R (y(mu) = V diag(s / (s^2 + mu)) W^T beta, no linear solves)."""
         R = H
         A_ = R.T @ R
         b = R.T @ beta
+        if self.mu_search:
+            W, s, Vt = np.linalg.svd(R)
+            g = s * (W.conj().T @ beta)
+
+            def y_of(mu):
+                return Vt.conj().T @ (g / (s**2 + mu))
 
         def trust_region(Delta, mu):
             if mu == 0:
                 y_norm = self.norm(y0)
                 self.write_trust_region(iN, y_norm, mu, y0, A_, iA)
                 return y0, self.mu0
+
+            if self.mu_search:
+                mu = self.search_mu(y_of, Delta, s)
+                y = y_of(mu)
+                self.write_trust_region(iN, Delta, mu, y, A_ + mu * np.eye(A_.shape[0]), iA)
+                return y, mu
 
             for _ in range(1, 1000):
                 A = A_ + mu * np.eye(A_.shape[0])
@@ -950,10 +1006,9 @@ class ArclengthNewtonSolver(UPONewtonSolver):
         """Perform hookstep update with the arclength constraint included in the residual."""
         U, T, sx, lda = self.unpack_X(X)
         y = backsub(H, beta)
-        Delta = self.norm(y)
 
         trust_region = self.trust_region_function(H, beta, iN, y, arclength["iA"])
-        mu = 0.
+        Delta, mu = self.hook_start(y)
 
         for iH in range(self.N_hook):
             y, mu = trust_region(Delta, mu)
@@ -987,7 +1042,7 @@ class ArclengthNewtonSolver(UPONewtonSolver):
                 break
             else:
                 Delta *= self.reduc_reg
-                
+        self.hook_done(y, iH)
         return X_new, F_new, UT
 
     def write_header_newton(self, iA: int | None = None):
@@ -1110,6 +1165,7 @@ class ArclengthNewtonSolver(UPONewtonSolver):
         X = X_restart if X_restart is not None else X1
 
         start_iN = self.restart_iN + 1 if (iA == self.restart_iA) else 1
+        self._Delta_prev = None
 
         for iN in range(start_iN, self.N_newt):
             U, T, sx, lda = self.unpack_X(X)

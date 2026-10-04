@@ -831,7 +831,7 @@ class UPONewtonSolver(DynSys):
                 break
             else:
                 Delta *= self.reduc_reg
-        self.hook_done(y, iH)
+        self.hook_done(y, iH, F_new <= lin_exp)
         return X_new, F_new, UT
 
     def hook_start(self, y0):
@@ -842,11 +842,12 @@ class UPONewtonSolver(DynSys):
             return self._Delta_prev, self.mu0
         return Delta, 0.
 
-    def hook_done(self, y, iH):
+    def hook_done(self, y, iH, accepted):
         """With ``mu_search``, keep the accepted |y| as the next radius, enlarged by ``delta_inc`` if the
-        first trial was accepted."""
+        first trial was accepted.  If all ``N_hook`` trials were rejected, forget the radius (the next
+        iteration starts again from the full Newton step) instead of keeping the last, shrunken one."""
         if self.mu_search:
-            self._Delta_prev = self.norm(y) * (self.delta_inc if iH == 0 else 1.)
+            self._Delta_prev = self.norm(y) * (self.delta_inc if iH == 0 else 1.) if accepted else None
 
     def search_mu(self, y_of, Delta, s, rtol=0.1, n_bisect=60):
         """mu > 0 with (1 - rtol) Delta <= |y(mu)| <= Delta, by bisection in log(mu) (|y(mu)| decreases
@@ -1042,7 +1043,7 @@ class ArclengthNewtonSolver(UPONewtonSolver):
                 break
             else:
                 Delta *= self.reduc_reg
-        self.hook_done(y, iH)
+        self.hook_done(y, iH, F_new <= lin_exp)
         return X_new, F_new, UT
 
     def write_header_newton(self, iA: int | None = None):

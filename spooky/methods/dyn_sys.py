@@ -1010,6 +1010,7 @@ class ArclengthNewtonSolver(UPONewtonSolver):
 
         trust_region = self.trust_region_function(H, beta, iN, y, arclength["iA"])
         Delta, mu = self.hook_start(y)
+        UT = None
 
         for iH in range(self.N_hook):
             y, mu = trust_region(Delta, mu)
@@ -1019,11 +1020,18 @@ class ArclengthNewtonSolver(UPONewtonSolver):
             U_new = self.apply_proj(U, dU, self.sp2)
             sx_new = sx + dsx.real if self.sx is not None else 0.
             T_new = T + dT.real if self.T else self.Tconst
-            
+
             X_new = super().form_X(U_new, T_new, sx_new)
-            
+
             lda_new = lda + dlda.real
             X_new = np.append(X_new, lda_new)
+            if not lda_new > 0:
+                # the trial leaves the parameter range (e.g. Ra <= 0 from a large full Newton step): reject it
+                # without evolving (the solver cannot be built there) and shrink the trust region
+                F_new, lin_exp = np.inf, self.norm(beta - self.c * H @ y)
+                self.write_hookstep(iN, iH, F_new, lin_exp, arclength["iA"])
+                Delta *= self.reduc_reg
+                continue
             self.update_lda(lda_new)
 
             UT = self.evolve(U_new, T_new)

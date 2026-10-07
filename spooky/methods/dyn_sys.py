@@ -30,11 +30,20 @@ class DynSys():
         physical mean-square norm on a Chebyshev grid.  The tangent map is
         conjugated by the same diagonal scaling, which leaves Floquet
         multipliers (and periodic orbits) unchanged.  Default: unweighted.
+    sym: callable or None, optional
+        A linear involution sigma of the fields (list of physical arrays ->
+        list) that commutes with the flow, e.g. a reflection.  When given, the
+        map after the flow becomes sigma tau_sx (``post_map``): Newton then
+        solves sigma tau_sx Phi_T(U) = U, i.e. pre-periodic orbits with
+        u(T) = (sigma tau_sx)^-1 u(0) over half of their period, and Floquet
+        returns the eigenvalues of sigma tau_sx DPhi_T, whose squares are the
+        multipliers of the full orbit.  Default: None (plain tau_sx).
     """
-    def __init__(self, solver, weights=None):
+    def __init__(self, solver, weights=None, sym=None):
         self.solver = solver
         self.grid = solver.grid
         self.weights = None if weights is None else [np.asarray(w, dtype=float) for w in weights]
+        self.sym = sym
 
         # Wall-bounded grids carry interior-only state for the UPO/Floquet
         # machinery: the Dirichlet boundary rows are stripped on flatten and
@@ -83,6 +92,18 @@ class DynSys():
     def translate(self, U, *args):
         '''Translates fields by sx in x direction'''
         return self.grid.translate(U, *args)
+
+    def symmetry(self, U):
+        '''Flat-vector action of ``sym`` (identity when sym is None)'''
+        if self.sym is None:
+            return U
+        return self.flatten(self.sym(self.unflatten(U)))
+
+    def post_map(self, UT, sx=None):
+        '''The map applied after the flow: translate by sx (if not None), then ``sym``'''
+        if sx is not None:
+            UT = self.translate(UT, sx)
+        return self.symmetry(UT)
 
     @flatten_dec
     def deriv_U(self, U, *args):
@@ -185,7 +206,7 @@ class DynSys():
         return primals, vjp_fn(cotangent_fields)
 
     def tangent_map(self, U, dU, T, sx=None, UT=None, ep0=1e-7):
-        """Action of the tangent map J = d(translate_sx ∘ Φ_T)/dU on dU.
+        """Action of the tangent map J = d(sym ∘ translate_sx ∘ Φ_T)/dU on dU.
 
         Flat-vector interface shared by Floquet, Lyapunov and Newton-Krylov.
         JAX backend: exact JVP through ad_evolve.  NumPy backend: first-order
@@ -200,7 +221,7 @@ class DynSys():
         sx : float or None
             Optional x-translation applied after the flow map.
         UT : np.ndarray or None
-            Base-point image translate(Φ_T(U), sx) — required for the FD
+            Base-point image post_map(Φ_T(U), sx) — required for the FD
             (NumPy) path, ignored under JAX.
         ep0 : float
             FD perturbation scale factor.
@@ -210,17 +231,13 @@ class DynSys():
             f_jax  = [jnp.array(f) for f in self.unflatten(U)]
             dU_jax = [jnp.array(d) for d in self.unflatten(dU)]
             _, tangent_list = self.jvp_evolve(f_jax, dU_jax, T)
-            J_dU = np.array(self.flatten(tangent_list))
-            if sx is not None:
-                J_dU = self.translate(J_dU, sx)
+            J_dU = self.post_map(np.array(self.flatten(tangent_list)), sx)
         else:
             if UT is None:
                 raise ValueError(
-                    "tangent_map FD path requires UT = translate(Phi_T(U), sx)")
+                    "tangent_map FD path requires UT = post_map(Phi_T(U), sx)")
             epsilon = ep0 * np.linalg.norm(U) / np.linalg.norm(dU)
-            J_dU = self.evolve(U + epsilon * dU, T)
-            if sx is not None:
-                J_dU = self.translate(J_dU, sx)
+            J_dU = self.post_map(self.evolve(U + epsilon * dU, T), sx)
             J_dU = (J_dU - UT) / epsilon
         return J_dU
 
@@ -238,7 +255,7 @@ class DynSys():
         Uevol : np.ndarray
             Untranslated image Φ_T(U) (the next base point).
         V : np.ndarray, shape (len(U), n)
-            Tangent images (translated by sx if given).
+            Tangent images (post_map: translated by sx if given, then sym).
         """
         n = dUs.shape[1]
         V = np.zeros((len(U), n))
@@ -251,12 +268,10 @@ class DynSys():
             primals, tans = self._compiled_jvp(T, batched=True)(f_jax, batched)
             Uevol = np.array(self.flatten(primals))
             for i in range(n):
-                V[:, i] = self.flatten([np.array(t[i]) for t in tans])
-                if sx is not None:
-                    V[:, i] = self.translate(V[:, i], sx)
+                V[:, i] = self.post_map(self.flatten([np.array(t[i]) for t in tans]), sx)
         else:
             Uevol = self.evolve(U, T)
-            UT = self.translate(Uevol, sx) if sx is not None else Uevol
+            UT = self.post_map(Uevol, sx)
             for i in range(n):
                 V[:, i] = self.tangent_map(U, dUs[:, i], T, sx=sx, UT=UT,
                                            ep0=ep0)
@@ -328,9 +343,8 @@ class DynSys():
         U = self.flatten(fields)
         UT = self.evolve(U, T)
 
-        # Translate UT by sx
-        if sx is not None:
-            UT = self.translate(UT, sx)
+        # Translate UT by sx (and apply sym)
+        UT = self.post_map(UT, sx)
 
         def apply_J(dU):
             ''' Applies J (jacobian of poincare map) matrix to vector dU  '''
@@ -599,9 +613,10 @@ class UPONewtonSolver(DynSys):
                  apply_A_dir: str = 'apply_A',
                  converged_dir: str = 'converged',
                  weights=None,
+                 sym=None,
                  ):
 
-        super().__init__(solver, weights=weights)
+        super().__init__(solver, weights=weights, sym=sym)
         
         # System parameters
         self.T = T
@@ -725,10 +740,12 @@ class UPONewtonSolver(DynSys):
 
         if self.sx is not None:
             UT = self.translate(UT, sx)
-            dUT_ds = self.deriv_U(UT, self.grid.kx)
+            # d/dsx of sym(tau_sx Phi): differentiate before sym (X-type reflections anticommute with d/dx)
+            dUT_ds = self.symmetry(self.deriv_U(UT, self.grid.kx))
             dU_ds = self.deriv_U(U, self.grid.kx)
         else:
             dUT_ds = dU_ds = np.zeros_like(U)
+        UT = self.symmetry(UT)
 
         if self.T is not None:
             dUT_dT = self.evolve(UT, self.grid.dt)
@@ -792,8 +809,7 @@ class UPONewtonSolver(DynSys):
                 save_out = True if self.save_outputs in ('all', 'last') else False
                 save_bal = True if self.save_balance in ('all', 'last') else False
                 UT = self.evolve(U, T, **self._evolve_kwargs(save_out, save_bal, iN=iN))
-                if self.sx is not None:
-                    UT = self.translate(UT, sx)
+                UT = self.post_map(UT, sx if self.sx is not None else None)
                 b = self.form_b(U, UT)
                 F = self.norm(b)
                 self.write_newton(iN+1, F, U, sx, T)
@@ -817,9 +833,7 @@ class UPONewtonSolver(DynSys):
             T_new = T + dT.real if self.T else self.Tconst
             X_new = self.form_X(U_new, T_new, sx_new)
 
-            UT = self.evolve(U_new, T_new)
-            if self.sx is not None:
-                UT = self.translate(UT, sx_new)
+            UT = self.post_map(self.evolve(U_new, T_new), sx_new if self.sx is not None else None)
 
             b = self.form_b(U_new, UT)
             F_new = self.norm(b)
@@ -1034,9 +1048,7 @@ class ArclengthNewtonSolver(UPONewtonSolver):
                 continue
             self.update_lda(lda_new)
 
-            UT = self.evolve(U_new, T_new)
-            if self.sx is not None:
-                UT = self.translate(UT, sx_new)
+            UT = self.post_map(self.evolve(U_new, T_new), sx_new if self.sx is not None else None)
 
             b = self.form_b(U_new, UT)
             N = self.N_constraint(X_new, arclength["dX_dr"], arclength["dr"], arclength["X1"])
@@ -1117,10 +1129,12 @@ class ArclengthNewtonSolver(UPONewtonSolver):
 
         if self.sx is not None:
             UT = self.translate(UT, sx)
-            dUT_ds = self.deriv_U(UT, self.grid.kx)
+            # d/dsx of sym(tau_sx Phi): differentiate before sym (X-type reflections anticommute with d/dx)
+            dUT_ds = self.symmetry(self.deriv_U(UT, self.grid.kx))
             dU_ds = self.deriv_U(U, self.grid.kx)
         else:
             dUT_ds = dU_ds = np.zeros_like(U)
+        UT = self.symmetry(UT)
 
         if self.T is not None:
             dUT_dT = self.evolve(UT, self.grid.dt)
@@ -1132,9 +1146,7 @@ class ArclengthNewtonSolver(UPONewtonSolver):
 
         dlda = lda * 1e-3
         self.update_lda(lda + dlda)
-        dUT_dlda = self.evolve(U, T)
-        if self.sx is not None:
-            dUT_dlda = self.translate(dUT_dlda, sx)
+        dUT_dlda = self.post_map(self.evolve(U, T), sx if self.sx is not None else None)
         dUT_dlda = (dUT_dlda - UT) / dlda
         self.update_lda(lda)
 
@@ -1196,9 +1208,8 @@ class ArclengthNewtonSolver(UPONewtonSolver):
                 save_out = True if self.save_outputs in ('all', 'last') else False
                 save_bal = True if self.save_balance in ('all', 'last') else False
                 UT = self.evolve(U, T, **self._evolve_kwargs(save_out, save_bal, iN=iN))
-                if self.sx is not None:
-                    UT = self.translate(UT, sx)
-                    
+                UT = self.post_map(UT, sx if self.sx is not None else None)
+
                 b = self.form_b(U, UT)
                 N = self.N_constraint(X, dX_dr, dr, X1)
                 b = np.append(b, -N)
